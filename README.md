@@ -68,6 +68,10 @@ See [`datacollection/README_data_collection.md`](datacollection/README_data_coll
 for the end-to-end guide on recording your own Project Aria data and running
 MPS (SLAM + hand tracking) on it.
 
+> **Dataset release — coming soon.** We will be sharing the full HumanEgo
+> dataset (raw Aria recordings + MPS-processed annotations) publicly. Stay
+> tuned.
+
 ---
 
 ## Preprocess
