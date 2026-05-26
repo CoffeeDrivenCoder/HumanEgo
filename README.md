@@ -82,6 +82,10 @@ MPS (SLAM + hand tracking) on it.
 
 ## Training
 
+<p align="center">
+  <img src="assets/architecture.webp" alt="HumanEgo training architecture" width="100%" />
+</p>
+
 > **TODO** — documentation coming soon.
 
 ---
@@ -116,7 +120,7 @@ and [Orient-Anything](https://github.com/SpatialVision/Orient-Anything).
   title         = {HumanEgo: Zero-Shot Robot Learning from Minutes of Human Egocentric Videos},
   author        = {Wang, Zhi and He, Botao and Yu, Kelin and Lee, Seungjae and Gao, Ruohan and Huang, Furong and Aloimonos, Yiannis},
   year          = {2026},
-  eprint        = {XXXX.XXXXX},
+  eprint        = {2605.24934},
   archivePrefix = {arXiv},
   primaryClass  = {cs.RO}
 }
