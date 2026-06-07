@@ -34,6 +34,15 @@
   <img src="assets/teaser.gif" alt="HumanEgo teaser" width="100%" />
 </p>
 
+There are three ways to use this repo, in increasing order of effort:
+
+1. **[Quick Start](#quick-start)** — run the whole pipeline end-to-end on two
+   sample recordings, as a smoke test.
+2. **[Train on the HumanEgo Dataset](#train-on-the-humanego-dataset)** — download
+   our full released data (with precomputed labels) and train, no hardware needed.
+3. **[Train Your Own Policy](#train-your-own-policy)** — collect your own
+   egocentric demonstrations with Project Aria glasses and train on them.
+
 ---
 
 ## Installation
@@ -69,7 +78,8 @@ python scripts/download_data.py --task serve_bread --num 2 --input-only
 Fetches `mps_serve_bread_000_vrs` and `mps_serve_bread_001_vrs` into
 `./data/serve_bread/aria/`, skipping the precomputed `preprocess/` output so you
 run the pipeline yourself. See
-[Download the released data](#download-the-released-data) for more options.
+[Train on the HumanEgo Dataset](#train-on-the-humanego-dataset) for the full
+dataset and all download options.
 
 **2. Preprocess both**
 
@@ -78,8 +88,8 @@ python -m preprocess.Preprocess --mps_path ./data/serve_bread/aria/mps_serve_bre
 python -m preprocess.Preprocess --mps_path ./data/serve_bread/aria/mps_serve_bread_001_vrs --task serve_bread
 ```
 
-Regenerates each recording's `preprocess/` folder. See [Preprocess](#preprocess)
-for details.
+Regenerates each recording's `preprocess/` folder. See
+[Step 2: Preprocessing](#step-2-preprocessing) for details.
 
 **3. Train**
 
@@ -89,11 +99,61 @@ python -m training.FlowMatchingTrainer --task serve_bread --use_cfg --job HumanE
 
 Trains on `mps_serve_bread_001_vrs` and evaluates on the held-out
 `mps_serve_bread_000_vrs` (config: `cfg/training/serve_bread/HumanEgo.yaml`).
-See [Training](#training) for details.
+See [Step 3: Training](#step-3-training) for details.
 
 ---
 
-## Data Collection
+## Train on the HumanEgo Dataset
+
+Skip data collection entirely: download our full released dataset — raw Aria
+recordings **and** the precomputed MPS + preprocess output — and train directly.
+Everything is hosted on the public HuggingFace dataset
+[`Leo-TX/HumanEgo`](https://huggingface.co/datasets/Leo-TX/HumanEgo), no login or
+token required. We release two tasks: **`serve_bread`** and **`water_flowers`**.
+
+### Download the full dataset
+
+```bash
+pip install huggingface_hub
+
+# everything, both tasks, with precomputed preprocess output (large)
+python scripts/download_data.py --task all --num all
+
+# or one task at a time
+python scripts/download_data.py --task serve_bread   --num all
+python scripts/download_data.py --task water_flowers --num all
+```
+
+Each recording lands at `./data/<task>/aria/mps_<task>_<id>_vrs/` with its
+`preprocess/` folder already populated (the `all_data.tar` is auto-extracted).
+Use `--num N` for the first N recordings, or `--input-only` to skip the
+precomputed output and run preprocessing yourself. See
+[`preprocess/README.md`](preprocess/README.md) for the full output-file
+reference and a plain-`huggingface_hub` recipe.
+
+### Train
+
+```bash
+# serve_bread
+python -m training.FlowMatchingTrainer --task serve_bread   --use_cfg --job HumanEgo
+
+# water_flowers
+python -m training.FlowMatchingTrainer --task water_flowers --use_cfg --job HumanEgo
+```
+
+Each job holds out recording `000` of the task for evaluation and trains on the
+rest, reading `cfg/training/<task>/HumanEgo.yaml`. See
+[Step 3: Training](#step-3-training) for the `--task` / `--job` convention.
+
+---
+
+## Train Your Own Policy
+
+Collect your own human-egocentric demonstrations and train a policy on them,
+end-to-end — record with Project Aria glasses, process the data through MPS,
+preprocess it, train, and deploy.
+
+### Step 1: Data Collection
 
 <p align="center">
   <img src="assets/data_collection.gif" alt="HumanEgo data collection — anyone, anytime, anywhere, with only 30 minutes of data" width="100%" />
@@ -126,54 +186,24 @@ MPS (SLAM + hand tracking) on it. The resulting data should look like this:
         - sample.vrs
 ```
 
-### Download the released data
-
-The HumanEgo dataset (raw Aria recordings + MPS-processed annotations) is hosted on the
-public HuggingFace dataset
-[`Leo-TX/HumanEgo`](https://huggingface.co/datasets/Leo-TX/HumanEgo) — no login or token
-required. A sample recording is available now so you can test the pipeline end-to-end:
-
-```bash
-pip install huggingface_hub
-
-# one serve_bread recording (default), with precomputed output (~2 GB, auto-extracted)
-python scripts/download_data.py
-
-# the first 20 serve_bread recordings (use --task all / --num all for everything)
-python scripts/download_data.py --task serve_bread --num 20
-
-# input only (~0.6 GB), to run preprocessing yourself
-python scripts/download_data.py --input-only
-```
-
-Pick the task with `--task {serve_bread,water_flowers,all}`, the count with `--num N|all`,
-and the destination with `--out <dir>`. See [`preprocess/README.md`](preprocess/README.md)
-for all options, the full output-file reference, and a plain-`huggingface_hub` recipe.
-
----
-
-## Preprocess
+### Step 2: Preprocessing
 
 <p align="center">
   <img src="assets/data_collection.webp" alt="HumanEgo preprocessing visualization" width="100%" />
 </p>
 
-After downloading the sample (see [Download the released data](#download-the-released-data)
-above), run the full pipeline on it:
+Turn raw MPS output into training-ready data — point `--mps_path` at the MPS
+folder from Step 1:
 
 ```bash
-python -m preprocess.Preprocess \
-    --mps_path ./data/serve_bread/aria/mps_serve_bread_000_vrs --task serve_bread
+python -m preprocess.Preprocess --mps_path ./data/<your_mps_folder> --task <your_task>
 ```
 
-This regenerates everything under `…/preprocess/`. To compare against the precomputed
-output instead of running the GPU pipeline, grab it with
-`python scripts/download_data.py --task serve_bread --num 1`. See
-**[`preprocess/README.md`](preprocess/README.md)** for the full data layout and download options.
+This regenerates everything under `…/preprocess/`. See
+**[`preprocess/README.md`](preprocess/README.md)** for the full data layout,
+the output-file reference, and download options.
 
----
-
-## Training
+### Step 3: Training
 
 <p align="center">
   <img src="assets/architecture.webp" alt="HumanEgo training architecture" width="100%" />
@@ -187,9 +217,7 @@ python -m training.FlowMatchingTrainer --task "YOUR_TASK" --use_cfg --job "YOUR_
 `--job` selects a YAML inside it (e.g. `HumanEgo`, resolving to
 `cfg/training/serve_bread/HumanEgo.yaml`).
 
----
-
-## Inference
+### Step 4: Inference
 
 > **TODO** — documentation coming soon.
 
@@ -200,9 +228,7 @@ python -m training.FlowMatchingTrainer --task "YOUR_TASK" --use_cfg --job "YOUR_
 We are actively releasing the following — check back soon.
 
 - [ ] Release a 3-minute quick-start tutorial
-- [ ] Release a sample human-egocentric dataset (for end-to-end testing)
 - [ ] Release a pretrained model (for inference demo)
-- [ ] Release documentation for **Preprocessing**
 - [ ] Release documentation for **Training**
 - [ ] Release documentation for **Inference**
 
