@@ -19,10 +19,17 @@
 #   [6] Patch chumpy & HaMeR for compatibility
 #   [7] Verify all imports
 #
-# Optional env vars:
-#   SKIP_HAND=1           — skip hand tracking packages
-#   PREDOWNLOAD=1         — pre-download all model weights
-#   SKIP_HARDWARE=1       — skip pyrealsense2 & trossen-arm (for non-robot machines)
+# Install options (env vars). Defaults are tuned for the most common path —
+# downloading our precomputed HumanEgo dataset and training — so robot hardware
+# and hand-tracking packages are SKIPPED and no model weights are pre-downloaded.
+# Opt back in per-run by flipping a flag:
+#   SKIP_HARDWARE=1  (default)  skip pyrealsense2 & trossen-arm;  set 0 to install
+#   SKIP_HAND=1      (default)  skip MediaPipe / WiLoR / HaMeR;   set 0 to install
+#   PREDOWNLOAD=0    (default)  don't pre-download weights;       set 1 to fetch now
+#
+# Examples:
+#   SKIP_HAND=0 bash setup.sh                  # also install hand tracking (needed to preprocess)
+#   SKIP_HARDWARE=0 SKIP_HAND=0 bash setup.sh  # full install (robot + camera + hands)
 #
 # ==============================================================================
 
@@ -39,6 +46,13 @@ step()  { echo -e "\n${BLUE}═════════════════�
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_ROOT"
 info "Project root: $PROJECT_ROOT"
+
+# ── Install options (single source of truth; see header for descriptions) ──
+# Lightweight by default: skip robot hardware + hand tracking, no weight pre-download.
+# Override per-run, e.g.:  SKIP_HARDWARE=0 SKIP_HAND=0 bash setup.sh
+SKIP_HARDWARE="${SKIP_HARDWARE:-1}"
+SKIP_HAND="${SKIP_HAND:-1}"
+PREDOWNLOAD="${PREDOWNLOAD:-0}"
 
 # ==============================================================================
 # [1/7] Verify Conda Environment
@@ -84,7 +98,7 @@ $PIP install --no-deps projectaria-client-sdk==1.1.0
 # If no hardware (no robot/camera), filter out those packages
 # Always filter out projectaria-tools/client-sdk (already installed above with --no-deps)
 FILTER_PATTERN="^projectaria-tools|^projectaria-client-sdk"
-if [ "${SKIP_HARDWARE:-0}" = "1" ]; then
+if [ "$SKIP_HARDWARE" = "1" ]; then
     info "SKIP_HARDWARE=1 — filtering out pyrealsense2 and trossen-arm"
     FILTER_PATTERN="$FILTER_PATTERN|^pyrealsense2|^trossen-arm"
 fi
@@ -116,7 +130,7 @@ info "[4/7] Git-based packages installed"
 # ==============================================================================
 # [5/7] Hand tracking packages (MediaPipe / WiLoR / HaMeR)
 # ==============================================================================
-if [ "${SKIP_HAND:-0}" = "1" ]; then
+if [ "$SKIP_HAND" = "1" ]; then
     step "[5/7] Skipping hand tracking packages (SKIP_HAND=1)"
 else
     step "[5/7] Installing hand tracking packages"
@@ -182,7 +196,7 @@ else
 fi
 
 # --- Patch HaMeR vitdet_dataset.py (suppress debug print) ---
-if [ "${SKIP_HAND:-0}" != "1" ]; then
+if [ "$SKIP_HAND" != "1" ]; then
     HAMER_VITDET=$($PYTHON -c "
 try:
     import hamer.datasets.vitdet_dataset as m
@@ -267,14 +281,14 @@ check_import "smplx"                 "import smplx"
 check_import "chumpy"                "import chumpy"
 check_import "pyrender"              "import pyrender"
 
-if [ "${SKIP_HARDWARE:-0}" != "1" ]; then
+if [ "$SKIP_HARDWARE" != "1" ]; then
     echo ""
     info "=== Hardware ==="
     check_import "pyrealsense2"      "import pyrealsense2"
     check_import "trossen_arm"       "import trossen_arm"
 fi
 
-if [ "${SKIP_HAND:-0}" != "1" ]; then
+if [ "$SKIP_HAND" != "1" ]; then
     echo ""
     info "=== Hand Tracking ==="
     check_import "mediapipe"         "import mediapipe"
@@ -293,7 +307,7 @@ check_import "utils.utils_io"             "from utils.utils_io import load_cfg"
 # ==============================================================================
 # Optional: Pre-download model weights
 # ==============================================================================
-if [ "${PREDOWNLOAD:-0}" = "1" ]; then
+if [ "$PREDOWNLOAD" = "1" ]; then
     step "Pre-downloading model weights..."
     $PYTHON -c "
 from huggingface_hub import hf_hub_download
@@ -348,7 +362,7 @@ else
     echo "  Some packages failed verification. Check the ✗ marks above."
     echo "  Common fixes:"
     echo "    - GPU not available: ensure NVIDIA drivers are installed"
-    echo "    - Hardware packages: use SKIP_HARDWARE=1 if no robot/camera"
-    echo "    - Hand tracking: use SKIP_HAND=1 if not needed"
+    echo "    - Hardware (pyrealsense2/trossen-arm): skipped by default; SKIP_HARDWARE=0 to install"
+    echo "    - Hand tracking (MediaPipe/WiLoR/HaMeR): skipped by default; SKIP_HAND=0 to install"
     echo ""
 fi
