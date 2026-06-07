@@ -26,6 +26,10 @@
   <a href="#bibtex"><img src="assets/title/btn_bibtex.png" alt="BibTeX" height="60" /></a>
 </p>
 
+---
+
+## Overview
+
 <p align="center">
   <img src="assets/teaser.gif" alt="HumanEgo teaser" width="100%" />
 </p>
@@ -54,9 +58,32 @@ methods (MediaPipe, WiLoR, HaMeR).
   <img src="assets/data_collection.gif" alt="HumanEgo data collection — anyone, anytime, anywhere, with only 30 minutes of data" width="100%" />
 </p>
 
+To apply for the Meta Project Aria glasses, see
+[projectaria.com/glasses](https://www.projectaria.com/glasses/).
+
 See [`datacollection/README.md`](datacollection/README.md)
 for the end-to-end guide on recording your own Project Aria data and running
-MPS (SLAM + hand tracking) on it.
+MPS (SLAM + hand tracking) on it. The resulting data should look like this:
+
+```
+- data
+    - mps_TEST_vrs/
+        - else
+            - sample.vrs.json
+            - vrs_health_check.json
+            - vrs_health_check_slam.json
+        - hand_tracking
+            - hand_tracking_results.csv
+            - summary.json
+        - slam
+            - closed_loop_trajectory.csv
+            - online_calibration.jsonl
+            - open_loop_trajectory.csv
+            - semidense_observations.csv.gz
+            - semidense_points.csv.gz
+            - summary.json
+        - sample.vrs
+```
 
 ### Download the released data
 

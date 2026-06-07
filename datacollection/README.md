@@ -1,4 +1,6 @@
-# Follow this doc to collect your own data with Aria Glasses
+# HumanEgo - Data Collection
+Follow this doc to collect your own data with Aria Glasses
+
 It's for Aria Gen1 glasses for now. The code for Aria Gen2 is coming soon...
 
 ## Install Aria Mobile App
@@ -114,16 +116,19 @@ After this, it should be:
         - sample.vrs
 ```
 
-## Visualize the aria sensors
+Now you finish Aria MPS process and get slam & hand tracking results.
+
+## Try to visualize the data
+### Visualize the aria sensors
 ```
-viewer_aria_sensors --vrs "./test_data/mps_TEST_vrs/sample.vrs"
+viewer_aria_sensors --vrs "./data/mps_TEST_vrs/sample.vrs"
 ```
 
-## Visualize the hand tracking and slam
+### Visualize the hand tracking and slam
 ```
-viewer_mps --vrs "./test_data/mps_TEST_vrs/sample.vrs" \
---trajectory "./test_data/mps_TEST_vrs/slam/closed_loop_trajectory.csv" \
---points "./test_data/mps_TEST_vrs//slam/semidense_points.csv.gz" \
---hands_all "./test_data/mps_TEST_vrs/hand_tracking/hand_tracking_results.csv" \
+viewer_mps --vrs "./data/mps_TEST_vrs/sample.vrs" \
+--trajectory "./data/mps_TEST_vrs/slam/closed_loop_trajectory.csv" \
+--points "./data/mps_TEST_vrs//slam/semidense_points.csv.gz" \
+--hands_all "./data/mps_TEST_vrs/hand_tracking/hand_tracking_results.csv" \
 --web
 ```
