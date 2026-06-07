@@ -246,7 +246,31 @@ full parameter reference, and how to add your own config.
 
 ### Step 4: Inference
 
-> **TODO** — documentation coming soon.
+Deploy a trained policy on a real dual-arm robot. Every control step the policy
+consumes a **clean, embodiment-agnostic image** (the real arm inpainted out, a
+virtual gripper rendered in its place) and **Interaction-Centric Tokens (ICT)**
+(every hand and object as a 6DoF entity), and predicts a future end-effector
+trajectory that is smoothed and servoed to the arms in a closed loop:
+
+```
+camera ─▶ perception ─▶ clean image + ICT ─▶ policy ─▶ EE trajectory ─▶ robot ─▶ (loop)
+```
+
+```bash
+# install the hardware drivers (RealSense + Trossen) first:
+SKIP_HARDWARE=0 bash setup.sh
+# then run the dual-arm reference loop:
+python inference/run_inference.py cfg/inference/example_dualarm.yaml
+```
+
+The [`inference/`](inference/README.md) folder is a clean, hardware-agnostic
+**reference template** — it shows the standard structure rather than a turn-key
+script. Implement three interfaces (`Camera`, `RobotArm`, `Perception`) for your
+own rig and reuse the policy + control logic unchanged. You'll need a trained
+checkpoint, a camera + arm(s), and a hand-eye calibration (`T_base_in_cam`). See
+**[`inference/README.md`](inference/README.md)** for the full walk-through: frame
+conventions, the step-by-step pipeline, how to write your own
+camera/robot/perception drivers, and the parameter-tuning guide.
 
 ---
 
@@ -256,7 +280,6 @@ We are actively releasing the following — check back soon.
 
 - [ ] Release a 3-minute quick-start tutorial
 - [ ] Release a pretrained model (for inference demo)
-- [ ] Release documentation for **Inference**
 
 ---
 
