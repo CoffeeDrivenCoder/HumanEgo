@@ -26,24 +26,6 @@
   <a href="#bibtex"><img src="assets/title/btn_bibtex.png" alt="BibTeX" height="60" /></a>
 </p>
 
-> 👋 **A quick note from the author**
->
-> Hi everyone,
->
-> Thanks so much for your interest in **HumanEgo**! I'm currently organizing the code for an upcoming release.
->
-> Here's what to expect:
-> - A portion of the dataset
-> - A detailed doc on how to preprocess the Aria data, with clear visualization (visual part and spatial part)
-> - Training instructions
-> - Tips for inference
->
-> I've been a bit busy these days 😭, but I'll definitely get everything out very soon.
->
-> Thanks for your patience — happy to chat anytime if you have questions or want to discuss!
->
-> — Leo
-
 <p align="center">
   <img src="assets/teaser.gif" alt="HumanEgo teaser" width="100%" />
 </p>
@@ -72,9 +54,26 @@ See [`datacollection/README_data_collection.md`](datacollection/README_data_coll
 for the end-to-end guide on recording your own Project Aria data and running
 MPS (SLAM + hand tracking) on it.
 
-> **Dataset release — coming soon.** We will be sharing the full HumanEgo
-> dataset (raw Aria recordings + MPS-processed annotations) publicly. Stay
-> tuned.
+### Download the released data
+
+The HumanEgo dataset (raw Aria recordings + MPS-processed annotations) is hosted on the
+public HuggingFace dataset
+[`Leo-TX/HumanEgo`](https://huggingface.co/datasets/Leo-TX/HumanEgo) — no login or token
+required. A sample recording is available now so you can test the pipeline end-to-end:
+
+```bash
+pip install huggingface_hub
+
+# one sample recording, input only (~0.6 GB) — enough to run preprocessing yourself
+python scripts/download_data.py --mode test
+
+# or input + the precomputed preprocess output (~2 GB, auto-extracted)
+python scripts/download_data.py --mode full
+```
+
+The sample downloads to `data/serve_bread/aria/mps_serve_bread_000_vrs/`. See
+[`docs/preprocess.md`](docs/preprocess.md) for all download modes (including the full
+dataset) and a plain-`huggingface_hub` recipe. More recordings to follow.
 
 ---
 
@@ -84,7 +83,18 @@ MPS (SLAM + hand tracking) on it.
   <img src="assets/data_collection.webp" alt="HumanEgo preprocessing visualization" width="100%" />
 </p>
 
-> **TODO** — documentation coming soon.
+After downloading the sample (see [Download the released data](#download-the-released-data)
+above), run the full pipeline on it:
+
+```bash
+python -m preprocess.Preprocess \
+    --mps_path ./data/serve_bread/aria/mps_serve_bread_000_vrs --task serve_bread
+```
+
+This regenerates everything under `…/preprocess/`. To compare against the precomputed
+output instead of running the GPU pipeline, grab it with
+`python scripts/download_data.py --mode full`. See
+**[`docs/preprocess.md`](docs/preprocess.md)** for the full data layout and download modes.
 
 ---
 
