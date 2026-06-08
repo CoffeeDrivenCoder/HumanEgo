@@ -80,6 +80,11 @@ PREDOWNLOAD=1   bash setup.sh   # pre-download model weights now (else fetched o
 
 ## Quick Start in 5 Minutes
 
+<table align="center"><tr>
+<td align="center" width="50%"><img src="assets/aria_vis_serve_bread.gif" width="100%" /><br><sub><code>serve_bread</code> — preprocessing visualization</sub></td>
+<td align="center" width="50%"><img src="assets/aria_vis_water_flowers.gif" width="100%" /><br><sub><code>water_flowers</code> — preprocessing visualization</sub></td>
+</tr></table>
+
 The fastest way to run the whole pipeline end-to-end — download, preprocess, and
 train on just a couple of recordings. The `HumanEgo` training job holds out the
 first recording (`mps_serve_bread_000_vrs`) for evaluation and trains on the
@@ -121,6 +126,11 @@ See [Step 3: Training](#step-3-training) for details.
 ---
 
 ## Train on the HumanEgo Dataset
+
+<table align="center"><tr>
+<td align="center" width="50%"><img src="assets/infer_serve_bread.gif" width="100%" /><br><sub><code>serve_bread</code> — learned policy on a real robot</sub></td>
+<td align="center" width="50%"><img src="assets/infer_water_flowers.gif" width="100%" /><br><sub><code>water_flowers</code> — learned policy on a real robot</sub></td>
+</tr></table>
 
 Skip data collection entirely: download our full released dataset — raw Aria
 recordings **and** the precomputed MPS + preprocess output — and train directly.
