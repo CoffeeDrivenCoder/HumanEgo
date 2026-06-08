@@ -152,8 +152,6 @@ token required. We release two tasks: **`serve_bread`** and **`water_flowers`**.
 ### Download the full dataset
 
 ```bash
-pip install huggingface_hub
-
 # everything, both tasks, with precomputed preprocess output (large)
 python scripts/download_data.py --task all --num all
 
