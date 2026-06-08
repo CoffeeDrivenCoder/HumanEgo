@@ -3,6 +3,11 @@ Follow this doc to collect your own data with Aria Glasses
 
 It's for Aria Gen1 glasses for now. The code for Aria Gen2 is coming soon...
 
+> **Environment.** These steps run inside the `humanego` conda environment from the
+> main [README](../README.md#installation). Create it first
+> (`conda create -n humanego python=3.11 -y && conda activate humanego && bash setup.sh`)
+> and keep it activated for the `pip install` / `conda activate humanego` steps below.
+
 ## Install Aria Mobile App
 Follow [ARK SW Downloads and Updates](https://facebookresearch.github.io/projectaria_tools/docs/ARK/mobile_companion_app). Install the app, sign in and pair.
 
@@ -118,6 +123,22 @@ After this, it should be:
 
 Now you finish Aria MPS process and get slam & hand tracking results.
 
+### Organize for the pipeline
+
+Preprocessing accepts any `--mps_path`, but **training** auto-discovers recordings under
+`data/<task>/aria/mps_<task>_<id>_vrs/`. Move your processed recording into that layout
+(run from `data/`):
+
+```
+TASK="serve_bread"   # your task name
+IDX="000"            # zero-padded recording index (000, 001, ...)
+mkdir -p "${TASK}/aria"
+mv "mps_${NAME}_vrs" "${TASK}/aria/mps_${TASK}_${IDX}_vrs"
+```
+
+The result is `data/<task>/aria/mps_<task>_<id>_vrs/`, ready for
+[preprocessing](../preprocess/README.md) and [training](../training/README.md).
+
 ## Try to visualize the data
 ### Visualize the aria sensors
 ```
@@ -128,7 +149,7 @@ viewer_aria_sensors --vrs "./data/mps_TEST_vrs/sample.vrs"
 ```
 viewer_mps --vrs "./data/mps_TEST_vrs/sample.vrs" \
 --trajectory "./data/mps_TEST_vrs/slam/closed_loop_trajectory.csv" \
---points "./data/mps_TEST_vrs//slam/semidense_points.csv.gz" \
+--points "./data/mps_TEST_vrs/slam/semidense_points.csv.gz" \
 --hands_all "./data/mps_TEST_vrs/hand_tracking/hand_tracking_results.csv" \
 --web
 ```

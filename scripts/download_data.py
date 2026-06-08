@@ -101,7 +101,7 @@ def main():
     if args.input_only:
         task0 = recs[0].split("/")[0]
         print(f"\nNext — run preprocessing, e.g.:\n"
-              f"  python -m preprocess.Preprocess --mps_path ./{recs[0]} --task {task0}")
+              f"  python -m preprocess.Preprocess --mps_path {os.path.join(args.out, recs[0])} --task {task0}")
 
 
 if __name__ == "__main__":

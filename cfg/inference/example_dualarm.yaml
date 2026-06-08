@@ -11,7 +11,7 @@
 policy:
   # (SET) trained weights. config.json + dataset_stats.json MUST sit next to it
   # (the trainer writes them there); they carry the architecture + normalization.
-  ckpt: "./runs/<task>/<exp>/<job>/latest_full.pt"
+  ckpt: "./runs/<task>/<job>/latest.pt"
   num_inference_steps: 20      # (TUNE) Euler ODE steps. 10-20 is a good range.
                                # Fewer = faster but coarser actions.
 
@@ -56,12 +56,13 @@ robot:
   cfg_paths:
     left:  "./cfg/inference/example_dualarm/RobotArmTrossenLeft.yaml"
     right: "./cfg/inference/example_dualarm/RobotArmTrossenRight.yaml"
-  # (SET) T_align bridges YOUR end-effector frame -> the "hand" frame the model
-  # was trained on. Identity if you trained on teleop/robot data in the same EE
-  # convention. For Aria-MPS-trained data use the EE->Aria-hand transform (see
-  # inference/Inference.py: T_align). Get this wrong and rotations will be off.
-  T_align:
-    - [1.0, 0.0, 0.0, 0.0]
-    - [0.0, 1.0, 0.0, 0.0]
-    - [0.0, 0.0, 1.0, 0.0]
-    - [0.0, 0.0, 0.0, 1.0]
+  # (SET) T_align bridges YOUR end-effector frame -> the "hand" frame the model was
+  # trained on. The released HumanEgo checkpoints are Aria-MPS-trained, so use the
+  # EE->Aria-hand transform below (as-is for the Trossen example rig). Use identity
+  # instead if you trained on teleop/robot data in the same EE convention. Get this
+  # wrong and rotations will be systematically off.
+  T_align:                       # Aria-MPS EE -> hand convention
+    - [-1.0,  0.0,  0.0,  0.0]
+    - [ 0.0,  0.0,  1.0,  0.0]
+    - [ 0.0,  1.0,  0.0,  0.0]
+    - [ 0.0,  0.0,  0.0,  1.0]

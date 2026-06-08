@@ -98,10 +98,12 @@ mps_serve_bread_000_vrs/
 | 8 | **visualkpts** | Render arm + object keypoints onto the RGB and arm-inpainted RGB. | — |
 | 9 | **datasetgen** | Consolidate everything into per-frame `training_data.json` — 4×4 SE(3) poses for cameras / hands / objects in an **object-centric world frame**, using a grasp "latch & propagate" state machine to keep object pose stable under occlusion. Also renders the object-centric 3D scene. | — |
 
-> The released default config runs hand tracking via **aria_mps only**. The
-> mediapipe / wilor / hamer methods are an **ablation** and are off by default (enable them
-> in `cfg/preprocess/base/Preprocess.yaml` → `hand_tracking_methods` if you want to
-> reproduce the hand-tracking ablation; they require extra model checkpoints).
+> The released default runs hand tracking via **aria_mps only** — that is all the
+> Quick Start needs. The mediapipe / wilor / hamer methods are an **ablation**, off by
+> default. Reproducing it takes three steps: install the extra packages
+> (`SKIP_HAND=0 bash setup.sh`), list the methods in
+> `cfg/preprocess/base/Preprocess.yaml` → `hand_tracking_methods`, **and** un-comment
+> `self.preprocess_hands()` in `preprocess/Preprocess.py` (it is commented out by default).
 
 ---
 
@@ -153,7 +155,7 @@ mps_serve_bread_000_vrs/
 | `aria_hands.json` | Per-frame MPS hand keypoints / pose. |
 | `aria_slam.json` | Per-frame SLAM device pose. |
 | `aria_phases.json` | Per-frame phase label. |
-| `training_data.json` | **The per-frame training target** (schema below). Written for object-centric frames. |
+| `training_data.json` | **The per-frame training target** (schema below). Written for the manipulation-phase frames. |
 
 ### 4.4 `training_data.json` schema
 
@@ -166,10 +168,13 @@ The final per-frame dataloader target produced by `DatasetGen`:
     "w", "h", "fps",             // image size, frame rate
     "k":   [3×3 intrinsics],
     "c2w": [4×4 camera-to-world],
-    "anchor_key": "obj1"         // object designated as the world origin (object-centric frame)
+    "anchor_key": "obj1",        // object designated as the world origin (object-centric frame)
+    "is_finished": <float>,      // 1.0 on the final frames of the demonstration
+    "world_transforms": { ... }  // reference-frame transforms (cam0, virtual_static_anchor)
   },
-  "obs": {                       // relative paths to this frame's images
-    "rgb_path", "mask_arm_path", "mask_obj_path",
+  "obs": {                       // image / mask paths for this frame
+    "rgb_path", "mask_arm_path",
+    "mask_obj_path",             // the COMBINED arm+object mask; per-object masks are mask_obj1.png / mask_obj2.png
     "rgb_WoArm_path", "rgb_WArmObjKpts_path", "rgb_WoArm_WArmObjKpts_path", ...
   },
   "entities": {
@@ -197,8 +202,8 @@ Configs live under `cfg/preprocess/` and are compiled per run (`load_cfg_dynamic
 - **`cfg/preprocess/base/Preprocess.yaml`** — the master config. It points to each module's
   YAML (`AriaCam_path`, `DINOSAM_path`, …) and sets `hand_tracking_methods`.
 - **`cfg/preprocess/base/<Module>.yaml`** — per-module **defaults**, one file per pipeline
-  stage (`AriaCam`, `AriaHands`, `AriaPhases`, `DINOSAM`, `KptsSelector`, `CoTracker`,
-  `CamTriangulator`, `Lama`, `VisualKpts`, `DatasetGen`). Every field is documented inline
+  stage (`AriaCam`, `AriaHands`, `AriaSlam`, `AriaPhases`, `DINOSAM`, `KptsSelector`,
+  `CoTracker`, `CamTriangulator`, `Lama`, `VisualKpts`, `DatasetGen`). Every field is documented inline
   in these files — read them for the full set of knobs and their defaults.
 - **`cfg/preprocess/tasks/<task>.yaml`** — a small per-task **override** selected by
   `--task <task>`, deep-merged over the base so you only specify what differs for your task.

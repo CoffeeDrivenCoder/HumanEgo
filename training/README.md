@@ -73,7 +73,7 @@ Everything lands in `runs/<task>/<job>/` (or `runs/<task>/<exp>/<job>/` with `--
 | `latest.pt` | Checkpoint (model + optimizer + epoch). Training **auto-resumes** from it if present. |
 | `dataset_stats.json` | Normalization statistics — computed once and cached. |
 | `config.json` | The fully-resolved config used for the run. |
-| `train_history.json`, `train_curve.png`, `eval_curve.png` | Loss history + curves. |
+| `train_curve.png`, `eval_curve.png` | Training / evaluation loss curves over epochs. |
 | `eval_snapshots/eval_ep_*.json` | Per-epoch eval metrics. |
 | `eval_render/epoch_*/` | GT-vs-pred visualization videos (every `vis_eval_every` epochs). |
 
@@ -89,7 +89,8 @@ then applies, in order:
 1. **YAML** — with `--use_cfg` it loads `cfg/training/<task>/<job>.yaml` (or
    `cfg/training/<task>/<exp>/<job>.yaml` when `--exp` is given).
 2. **CLI flags** — anything you pass (e.g. `--epochs 200 --lr 5e-5`) overrides the
-   YAML. Every `TrainConfig` field has a matching flag.
+   YAML. Most `TrainConfig` fields have a matching flag; the data-source fields
+   (`data_sources`, `data_root`, `eval_source`) are set in the YAML, not on the CLI.
 
 The run directory is always `runs/<task>/<job>/`, and `--task` also selects which data
 to load (`data/<task>/...`).

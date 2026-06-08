@@ -1,8 +1,8 @@
 # ==============================================================================
-# AriaMimic — Core Dependencies
+# HumanEgo — Core Dependencies
 # ==============================================================================
 # Install with: pip install -r requirements.txt
-# For full setup (including hand tracking), use: bash scripts/install.sh
+# For full setup (including hand tracking), use: SKIP_HAND=0 bash setup.sh
 # ==============================================================================
 
 # ── PyTorch (CUDA 12.8) ──

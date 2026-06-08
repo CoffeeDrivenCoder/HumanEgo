@@ -1,3 +1,5 @@
+<h3 align="center">🎉 HumanEgo is now fully released — code, dataset &amp; docs are all live! (June 7, 2026) 🎉</h3>
+
 <p align="center">
   <a href="https://humanego-ai.github.io">
     <img src="assets/title/hero.png" alt="HumanEgo — Zero-Shot Robot Learning from Minutes of Human Egocentric Videos" width="100%" />
@@ -298,6 +300,10 @@ Released under the [MIT License](LICENSE).
 ---
 
 ## Contact
+
+<p align="center">
+  <img src="assets/team.png" alt="The HumanEgo team — University of Maryland" width="100%" />
+</p>
 
 Questions are welcome! Reach out to Zhi (Leo) Wang at
 [tx.leo.wz@gmail.com](mailto:tx.leo.wz@gmail.com) (WeChat: `tx-leo-wz`).

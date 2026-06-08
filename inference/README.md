@@ -45,7 +45,7 @@ a policy trained purely on human egocentric video transfers to the robot.
 | [`controller.py`](controller.py) | `TrajectoryController`: smooth (EMA + Slerp) + rate-limit predictions and servo the arms (receding horizon). |
 | [`run_inference.py`](run_inference.py) | The main loop wiring it all together, plus example hardware adapters and a reference perception. |
 | [`../cfg/inference/example_dualarm.yaml`](../cfg/inference/example_dualarm.yaml) | One annotated config for the whole stack. |
-| `CamRS.py`, `RobotArmTrossen.py` | **Example** drivers (RealSense / Trossen) you can adapt. The production loop `Inference.py` is the full, feature-complete version of `run_inference.py`. |
+| `CamRS.py`, `RobotArmTrossen.py` | **Example** drivers (RealSense / Trossen) you can adapt to your own hardware. |
 
 ---
 
@@ -61,8 +61,9 @@ Most deployment bugs are frame bugs. The contract (see `interfaces.py`):
   #1 cause of "the robot moves to the wrong place".
 - **`T_align`** — bridges *your* end-effector frame to the **"hand" frame the model
   was trained on**. Identity if you trained on robot/teleop data in the same EE
-  convention; a fixed rotation if you trained on Aria-MPS hand data (see
-  `Inference.py: T_align`). Wrong `T_align` ⇒ orientations are systematically off.
+  convention; for the released Aria-MPS checkpoints use the fixed rotation provided
+  in [`example_dualarm.yaml`](../cfg/inference/example_dualarm.yaml) (the `T_align`
+  block). Wrong `T_align` ⇒ orientations are systematically off.
 
 ---
 
@@ -158,7 +159,7 @@ All knobs live in `example_dualarm.yaml`. The ones you will actually tune:
 | `max_pos_step` | `control` | Safety cage: max EE move per step (m). Keep small at first. |
 | `grasp_threshold` | `control` | Predicted grasp prob above which the gripper closes. |
 | `done_threshold` | `control` | Done prob above which the episode stops. |
-| `safe_z_min` | `control` | Base-frame Z floor — protects the table. **Set conservatively.** |
+| `safe_z_min` | `control` | Intended base-frame Z floor (table protection). **Note:** this template does not yet wire the value through to the driver — the Trossen example enforces its own −0.12 m floor — so rely on your driver's floor + e-stop and set conservatively. |
 
 **Bring-up tip:** start with a *low* `control_hz`, *small* `max_pos_step`, and a
 high `safe_z_min`, hand on the e-stop. Loosen once the motion looks right.
@@ -192,20 +193,20 @@ Implement the three interfaces in `interfaces.py` — that's the whole porting j
 
 ---
 
-## What this template leaves out (vs. the production `Inference.py`)
+## What this template leaves out
 
-The shipped `Inference.py` (2k LOC) is the battle-tested version. To keep the idea
-legible, this template omits:
+To keep the idea legible, this reference template intentionally omits several pieces
+from our internal production loop (not part of this release):
 
 - **Async control + temporal ensembling** — a worker thread servoing at a fixed rate
   decoupled from (slower) inference, averaging overlapping predictions for smoother
-  motion (`InferenceController.py`).
+  motion.
 - **Delta action mode**, PCD features, region attention, object-dynamics & visual-
-  foresight auxiliary heads — supported by the model; here we run the common
-  absolute-action path. See `InferencePolicy.py` for all of them.
+  foresight auxiliary heads — all supported by the model; here we run the common
+  absolute-action path.
 - **Robustness/UX**: keyboard tele-override, live visualization, post-grasp forced
   lift, IK-failure escape, interactive extrinsic calibration, grasp latching across
   occlusion, checkpoint architecture auto-detection.
 
-Start from this template, get a single arm reaching to an object, then add pieces
-from `Inference.py` as you need them.
+Start from this template, get a single arm reaching to an object, then layer these on
+as you need them.

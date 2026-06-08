@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# AriaMimic — One-Click Environment Setup
+# HumanEgo — One-Click Environment Setup
 # ==============================================================================
 #
 # Usage:
-#   git clone https://github.com/TX-Leo/AriaMimic.git
-#   cd AriaMimic
-#   conda create -n aria python=3.11 -y
-#   conda activate aria
+#   git clone https://github.com/TX-Leo/HumanEgo.git
+#   cd HumanEgo
+#   conda create -n humanego python=3.11 -y
+#   conda activate humanego
 #   bash setup.sh
 #
 # What this script does:
@@ -62,9 +62,9 @@ step "[1/7] Verifying conda environment"
 if [ -z "${CONDA_DEFAULT_ENV:-}" ] || [ "$CONDA_DEFAULT_ENV" = "base" ]; then
     error "No conda environment is active (or you're in 'base').
 Please run:
-  conda create -n aria python=3.11 -y
-  conda activate aria
-  bash scripts/setup.sh"
+  conda create -n humanego python=3.11 -y
+  conda activate humanego
+  bash setup.sh"
 fi
 
 PYTHON="$(which python)"
@@ -298,7 +298,7 @@ if [ "$SKIP_HAND" != "1" ]; then
 fi
 
 echo ""
-info "=== AriaMimic Modules ==="
+info "=== HumanEgo Modules ==="
 cd "$PROJECT_ROOT"
 check_import "preprocess.OrientAnything"  "from preprocess.OrientAnything import estimate_frame_pca1, estimate_frame_vlm, ORIENT_ANYTHING_AVAILABLE; assert ORIENT_ANYTHING_AVAILABLE"
 check_import "utils.utils_math"           "from utils.utils_math import rotmat_to_o6d, normalize_o6d"
@@ -352,9 +352,9 @@ if [ "$VERIFY_OK" = true ]; then
     echo ""
     echo "  Quick start:"
     echo "    conda activate $CONDA_DEFAULT_ENV"
-    echo "    python -m scripts.hf_data_download_examples         # download example data"
-    echo "    python -m preprocess.Preprocess --mps_path ...      # preprocess"
-    echo "    python -m training.ManipTrainerFM ...                # train"
+    echo "    python scripts/download_data.py --task serve_bread --num 2 --input-only   # download example data"
+    echo "    python -m preprocess.Preprocess --mps_path ./data/serve_bread/aria/mps_serve_bread_000_vrs --task serve_bread   # preprocess"
+    echo "    python -m training.FlowMatchingTrainer --task serve_bread --use_cfg --job HumanEgo   # train"
     echo ""
 else
     step "⚠ Setup finished with some warnings"
