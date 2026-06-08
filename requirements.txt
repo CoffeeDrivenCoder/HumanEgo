@@ -5,10 +5,15 @@
 # For full setup (including hand tracking), use: SKIP_HAND=0 bash setup.sh
 # ==============================================================================
 
-# ── PyTorch (CUDA 12.8) ──
---extra-index-url https://download.pytorch.org/whl/cu128
-torch>=2.5
-torchvision>=0.20
+# ── PyTorch — pinned to a CUDA 12.x build (works on driver >= 525 / CUDA 12.x) ──
+# NOTE: unpinned `torch>=2.5` resolves to the newest cu13x wheel, which fails on the
+# common CUDA 12.x drivers (torch.cuda.is_available() == False). Newer GPUs (e.g.
+# Blackwell) may need a newer cu12x/cu13x build — adjust the version + index to match
+# your driver (see https://pytorch.org). Verify after install:
+#   python -c "import torch; print(torch.cuda.is_available())"
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1
+torchvision==0.20.1
 xformers>=0.0.28
 
 # ── Scientific Computing ──
@@ -28,7 +33,7 @@ pyrender>=0.1.45
 trimesh>=4.0
 
 # ── Deep Learning Models ──
-transformers>=4.40
+transformers>=4.40,<5    # 5.x breaks Grounding DINO's AutoProcessor (preprocess dinosam stage)
 sam2>=1.0
 diffusers>=0.25
 timm>=0.9
