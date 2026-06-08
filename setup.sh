@@ -40,7 +40,12 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
-step()  { echo -e "\n${BLUE}══════════════════════════════════════════${NC}"; echo -e "${BLUE} $*${NC}"; echo -e "${BLUE}══════════════════════════════════════════${NC}"; }
+_SETUP_T0=$(date +%s); _STEP_T0=""
+step()  {
+    if [ -n "$_STEP_T0" ]; then echo -e "${GREEN}   ✓ previous step done in $(( $(date +%s) - _STEP_T0 ))s${NC}"; fi
+    echo -e "\n${BLUE}══════════════════════════════════════════${NC}"; echo -e "${BLUE} $*${NC}"; echo -e "${BLUE}══════════════════════════════════════════${NC}"
+    _STEP_T0=$(date +%s)
+}
 
 # ── Project Root ──
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -346,6 +351,7 @@ if [ "$VERIFY_OK" = true ]; then
     step "✓ Setup Complete!"
     echo ""
     echo "  Environment:  $CONDA_DEFAULT_ENV"
+    echo "  Total time:   $(( ($(date +%s) - _SETUP_T0) / 60 ))m $(( ($(date +%s) - _SETUP_T0) % 60 ))s"
     echo "  Python:       $($PYTHON --version)"
     echo "  PyTorch:      $($PYTHON -c 'import torch; print(torch.__version__)')"
     echo "  CUDA:         $($PYTHON -c 'import torch; print(torch.version.cuda)')"

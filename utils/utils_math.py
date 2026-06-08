@@ -47,30 +47,60 @@ def rotz(theta):
     return torch.tensor([[np.cos(theta), -np.sin(theta), 0], [np.sin(theta), np.cos(theta), 0], [0, 0, 1]], dtype=torch.float32)
 
     
+# Pretty labels for the Aria preprocess pipeline stages (drives the `Stage k/N`
+# banner). Any @time_it-decorated function not listed here keeps the plain banner.
+_PREPROCESS_STAGES = {
+    "preprocess_aria":            "Aria extraction (RGB · MPS hands · SLAM · phases)",
+    "preprocess_indices":         "Object-centric window",
+    "preprocess_dinosam":         "DINO + SAM2 detection & segmentation",
+    "preprocess_kptsselector":    "Keypoint selection",
+    "preprocess_cotracker":       "CoTracker 2D tracking",
+    "preprocess_camtriangulator": "3D triangulation",
+    "preprocess_lama":            "LaMa arm inpainting",
+    "preprocess_visualkpts":      "Keypoint rendering",
+    "preprocess_datasetgen":      "Dataset generation (training_data.json)",
+}
+_STAGE_ORDER = list(_PREPROCESS_STAGES)
+try:
+    from rich.console import Console as _RichConsole
+    _RC = _RichConsole()
+except Exception:
+    _RC = None
+
+
+def _fmt_dur(sec: float) -> str:
+    if sec > 3600:
+        return f"{sec / 3600:.2f}h"
+    if sec > 60:
+        return f"{sec / 60:.2f}m"
+    return f"{sec:.2f}s"
+
+
 def time_it(func):
     def wrapper(*args, **kwargs):
         start_time = time.perf_counter()
-        class_name = "Preprocess" 
+        class_name = "Preprocess"
         if args and hasattr(args[0], '__class__'):
             class_name = args[0].__class__.__name__
-        
-        print(f"\n{Color.HEADER}>>>>>>>>> Starting {class_name}.{func.__name__}{Color.END}")
-        
-        result = func(*args, **kwargs)
-        
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        
-        time_str = ""
-        if elapsed_time > 3600:
-            time_str = f"{elapsed_time / 3600:.2f}h"
-        elif elapsed_time > 60:
-            time_str = f"{elapsed_time / 60:.2f}m"
+
+        stage = _PREPROCESS_STAGES.get(func.__name__)
+        if stage and _RC is not None:
+            idx = _STAGE_ORDER.index(func.__name__) + 1
+            _RC.rule(f"[bold cyan]Stage {idx}/{len(_STAGE_ORDER)}[/]  [bold]{stage}[/]",
+                     style="cyan")
         else:
-            time_str = f"{elapsed_time:.2f}s"
-            
-        print(f"{Color.OKGREEN}<<<<<<<<< Finished {class_name}.{func.__name__} in {time_str}{Color.END}")
-        
+            print(f"\n{Color.HEADER}>>>>>>>>> Starting {class_name}.{func.__name__}{Color.END}")
+
+        result = func(*args, **kwargs)
+
+        time_str = _fmt_dur(time.perf_counter() - start_time)
+        if stage and _RC is not None:
+            idx = _STAGE_ORDER.index(func.__name__) + 1
+            _RC.print(f"[green]✓[/] Stage {idx}/{len(_STAGE_ORDER)} "
+                      f"[bold]{stage}[/] — done in [yellow]{time_str}[/]")
+        else:
+            print(f"{Color.OKGREEN}<<<<<<<<< Finished {class_name}.{func.__name__} in {time_str}{Color.END}")
+
         return result
     return wrapper
 
