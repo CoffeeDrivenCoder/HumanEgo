@@ -2,13 +2,12 @@
 # @FileName: FlowMatchingEvaluator.py
 """
 Teacher-forced Professional Visualization Evaluator for FlowMatchingModel
-Ultimate 2x3 Symmetrical Grid Edition (GT vs Pred) with Continuous 2D Traces
+GT vs Pred Hand Trajectory Edition.
 
 This script evaluates the Flow Matching Model by:
-1. Extracting K-step future 3D trajectories for Hands and Objects.
+1. Extracting K-step future 3D hand trajectories.
 2. Projecting 3D traces to 2D using camera intrinsics.
-3. Overlaying Continuous 2D Traces (Visual Foresight) as fading comet tails.
-4. Saving a side-by-side 2x3 Grid Video (GT on top, Pred on bottom).
+3. Saving a stacked GT-vs-Pred hand-trajectory video (GT on top, Pred on bottom).
 """
 
 from __future__ import annotations
@@ -105,13 +104,6 @@ def get_gt_hand_world(d_t: dict, side: str) -> Tuple[Optional[np.ndarray], float
         return np.array(hands[side]["T_hand_to_world"], dtype=np.float32), float(hands[side]["grasp"])
     return None, 0.0
 
-def get_gt_obj_world(d_t: dict, anchor_key: str) -> Optional[np.ndarray]:
-    """Extracts ground-truth 4x4 Object Pose."""
-    objs = d_t.get("entities", {}).get("objects", {})
-    if anchor_key in objs:
-        return np.array(objs[anchor_key]["T_obj_to_world"], dtype=np.float32)
-    return None
-
 def extract_anchor_uv(state_tensor: torch.Tensor, use_region_attn: bool) -> Optional[torch.Tensor]:
     """Dynamically finds the Object Anchor Token (TypeID==3.0) to serve as Spatial Attention Bias."""
     if not use_region_attn: 
@@ -134,33 +126,6 @@ def extract_anchor_uv(state_tensor: torch.Tensor, use_region_attn: bool) -> Opti
 # =================================================================================================
 # 3. Artistic Rendering Tools
 # =================================================================================================
-
-def draw_comet_trace(img: np.ndarray, trace_array: np.ndarray, color_bgr: Tuple[int, int, int]) -> np.ndarray:
-    """ 
-    Draws a fading "comet tail" for 2D Trace Regression outputs.
-    trace_array: (K, 2) array with normalized [0, 1] coordinates.
-    """
-    if trace_array is None or len(trace_array) == 0: 
-        return img
-        
-    H, W = img.shape[:2]
-    overlay = img.copy()
-    K_len = len(trace_array)
-    
-    # Scale normalized [0,1] coordinates back to pixel space
-    pts = np.zeros((K_len, 2), dtype=np.int32)
-    pts[:, 0] = np.clip(trace_array[:, 0] * W, 0, W-1).astype(np.int32)
-    pts[:, 1] = np.clip(trace_array[:, 1] * H, 0, H-1).astype(np.int32)
-    
-    for k in range(K_len - 1):
-        # Fade out into the future (alpha drops from 1.0 to 0.2)
-        alpha = max(0.2, 1.0 - (k / K_len))
-        color_faded = (int(color_bgr[0]*alpha), int(color_bgr[1]*alpha), int(color_bgr[2]*alpha))
-        
-        cv2.line(overlay, tuple(pts[k]), tuple(pts[k+1]), color_faded, 4, cv2.LINE_AA)
-        cv2.circle(overlay, tuple(pts[k]), 3, color_faded, -1, cv2.LINE_AA)
-        
-    return cv2.addWeighted(overlay, 0.8, img, 0.2, 0)
 
 def draw_polyline_uv(img: np.ndarray, uv: np.ndarray, valid: np.ndarray, color: Tuple[int,int,int], thickness=4, point_r=6) -> np.ndarray:
     """Draws connected 3D-to-2D projected points as a robust polyline."""
@@ -387,12 +352,7 @@ def run_teacher_forced_vis(
         raw_rgb_bgr = cv2.cvtColor(raw_rgb_img, cv2.COLOR_RGB2BGR) # Switch to BGR for OpenCV
         
         p_hand_gt = raw_rgb_bgr.copy()
-        p_obj_gt  = raw_rgb_bgr.copy()
-        p_trace_gt = raw_rgb_bgr.copy()
-        
         p_hand_pr = raw_rgb_bgr.copy()
-        p_obj_pr  = raw_rgb_bgr.copy()
-        p_trace_pr = raw_rgb_bgr.copy()
 
         T_ref2w = np.linalg.inv(T_w2ref)
 
@@ -438,80 +398,20 @@ def run_teacher_forced_vis(
                     uv_pr, v_pr = project_points_world_to_image(np.array(pred_pos_world), K_cam, T_c2w)
                     p_hand_pr = draw_polyline_uv(p_hand_pr, uv_pr, v_pr, c_hand)
 
-        # --- E. Draw Object Dynamics (Panel 2 & 5) ---
-        if model.use_aux_obj_dynamics:
-            c_obj = C_MAP["obj"]
-            anchor_key = d_t["metadata"].get("anchor_key", "obj1")
-            
-            # GT Object Rendering
-            gt_obj_pos_world =[]
-            for k in range(1, pred_horizon + 1):
-                dk = _read_json(dummy_ds._get_future_json_path(json_path_curr, k))
-                if dk:
-                    T_ok_w = get_gt_obj_world(dk, anchor_key)
-                    if T_ok_w is not None: gt_obj_pos_world.append(T_ok_w[:3, 3])
-                    
-            if len(gt_obj_pos_world) > 0:
-                uv_obj_gt, v_obj_gt = project_points_world_to_image(np.array(gt_obj_pos_world), K_cam, T_c2w)
-                p_obj_gt = draw_polyline_uv(p_obj_gt, uv_obj_gt, v_obj_gt, c_obj)
-
-            # PRED Object Rendering
-            T_obj_w_0 = get_gt_obj_world(d_t, anchor_key)
-            if T_obj_w_0 is not None:
-                T_obj_ref_base = T_w2ref @ T_obj_w_0
-                pred_obj_pos_world =[]
-                
-                for k in range(pred_horizon):
-                    p_norm = pred_action_full[k, base_dim : base_dim + 3] 
-                    o6d_norm = pred_action_full[k, base_dim + 3 : base_dim + 9]
-                    
-                    T_delta = np.eye(4)
-                    T_delta[:3, :3] = decode_o6d_to_mat(o6d_norm)
-                    T_delta[:3, 3] = unnormalize_pos(p_norm, dummy_ds.pos_mean, dummy_ds.pos_std)
-                    
-                    T_obj_ref_k = T_obj_ref_base @ T_delta if action_mode == 'delta' else T_delta
-                    pred_obj_pos_world.append((T_ref2w @ T_obj_ref_k)[:3, 3])
-                    
-                if len(pred_obj_pos_world) > 0:
-                    uv_obj_pr, v_obj_pr = project_points_world_to_image(np.array(pred_obj_pos_world), K_cam, T_c2w)
-                    p_obj_pr = draw_polyline_uv(p_obj_pr, uv_obj_pr, v_obj_pr, c_obj)
-
-        # --- F. Draw 2D Visual Traces (Panel 3 & 6) ---
-        if model.use_aux_visual_foresight:
-            trace_pr_tensor = out_dict["trace_pred"][0].cpu().numpy() # (K, num_targets, 2)
-            trace_gt_tensor = targets_gt["y_2d_trace"].numpy() 
-            
-            for ch_idx, side in enumerate(hand_sides):
-                c_hand = C_MAP[side]
-                p_trace_gt = draw_comet_trace(p_trace_gt, trace_gt_tensor[:, ch_idx], c_hand)
-                p_trace_pr = draw_comet_trace(p_trace_pr, trace_pr_tensor[:, ch_idx], c_hand)
-                
-            if model.use_aux_obj_dynamics:
-                c_obj = C_MAP["obj"]
-                p_trace_gt = draw_comet_trace(p_trace_gt, trace_gt_tensor[:, -1], c_obj)
-                p_trace_pr = draw_comet_trace(p_trace_pr, trace_pr_tensor[:, -1], c_obj)
-
-        # --- G. Assemble the 2x3 Grid ---
+        # --- E. Assemble the GT (top) vs Pred (bottom) Grid ---
         gt_title_suffix = " [FINISHED]" if gt_done_flag > 0.5 else ""
         pr_title_suffix = f" [DONE: {pred_done_prob:.2f}]"
-        
+
         # Draw explicit visual cues if the model predicts the task is finished
         if pred_done_prob > 0.5:
             cv2.rectangle(p_hand_pr, (0, 0), (p_hand_pr.shape[1], p_hand_pr.shape[0]), (0, 255, 0), 8)
-            cv2.putText(p_hand_pr, "TASK FINISHED", (int(p_hand_pr.shape[1]*0.5 - 110), int(p_hand_pr.shape[0]*0.85)), 
+            cv2.putText(p_hand_pr, "TASK FINISHED", (int(p_hand_pr.shape[1]*0.5 - 110), int(p_hand_pr.shape[0]*0.85)),
                         cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
-        p_hand_gt = put_title(p_hand_gt, f"Frame {int(fd)}{gt_title_suffix}", "1. GT Hand Traj")
-        p_obj_gt  = put_title(p_obj_gt,  f"Horizon = {pred_horizon}", "2. GT Object Traj")
-        p_trace_gt= put_title(p_trace_gt,f"Mode: {action_mode.upper()}", "3. GT 2D Vis Trace")
-        
-        p_hand_pr = put_title(p_hand_pr, f"Pred{pr_title_suffix}", "4. PRED Hand Traj")
-        p_obj_pr  = put_title(p_obj_pr,  "", "5. PRED Object Traj")
-        p_trace_pr= put_title(p_trace_pr,"", "6. PRED 2D Vis Trace")
+        p_hand_gt = put_title(p_hand_gt, f"Frame {int(fd)}{gt_title_suffix}", "GT Hand Traj")
+        p_hand_pr = put_title(p_hand_pr, f"Pred{pr_title_suffix}", "PRED Hand Traj")
 
-        top_row = np.hstack([p_hand_gt, p_obj_gt, p_trace_gt])
-        bottom_row = np.hstack([p_hand_pr, p_obj_pr, p_trace_pr])
-        canvas = np.vstack([top_row, bottom_row])
+        canvas = np.vstack([p_hand_gt, p_hand_pr])
         
         # if int(fd) % 10 == 0:
         #     cv2.imwrite(os.path.join(frames_dir, f"frame_{int(fd):05d}.png"), canvas)
@@ -523,7 +423,7 @@ def run_teacher_forced_vis(
     if make_video and vis_frames:
         create_video_from_frames(vis_frames, os.path.join(vis_dir, "evaluation_vis.mp4"), fps=30, export_gif=True, ratio=10)
     
-    console.print(f"[OK] Evaluator: 6-Grid Teacher-forced ({action_mode}) Visualization finished.")
+    console.print(f"[OK] Evaluator: GT-vs-Pred Hand Traj Teacher-forced ({action_mode}) Visualization finished.")
 
 
 if __name__ == "__main__":
