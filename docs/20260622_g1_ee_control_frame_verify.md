@@ -44,3 +44,24 @@ bash scripts/run_g1_verify_ee_control_to_public_server.sh
 如果 `observed_delta_m` 和 `commanded_delta_m` 的主轴、方向、量级一致，就可以认为控制目标是 `base_link` 下的 `arm_right_link7` pose。
 
 注意：`move` 模式会真实发控制命令。首次测试建议 `0.01m`，手放急停附近。
+
+## 2026-06-22 真机结果
+
+三步验证均已上传并检查：
+
+- observe：成功读取 `arm_right_link7`。
+- hold：`flat_dict` pose 格式调用成功，保持当前位置误差约 `0.1mm` 量级。
+- move：发送 `base_link +Z 0.01m`，读回位移：
+
+```text
+commanded_delta_m = [0.0, 0.0, 0.0100]
+observed_delta_m  = [0.00036, -0.00004, 0.00931]
+```
+
+结论：
+
+```text
+set_end_effector_pose_control 接收 base_link 坐标系下的 arm_right_link7 pose。
+right_pose 格式为 flat dict: {x, y, z, qx, qy, qz, qw}。
+control_group 使用 ["right_arm"]。
+```
