@@ -132,6 +132,47 @@ def encode_jpeg_b64(image_bgr: np.ndarray, quality: int) -> str:
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
+def resize_image_and_K(
+    image_bgr: np.ndarray,
+    K: np.ndarray,
+    target_width: int,
+    target_height: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    src_h, src_w = image_bgr.shape[:2]
+    target_width = int(target_width)
+    target_height = int(target_height)
+    if target_width <= 0 and target_height <= 0:
+        return image_bgr, np.asarray(K, dtype=np.float64).copy(), {
+            "resized": False,
+            "source_shape": list(image_bgr.shape),
+            "sent_shape": list(image_bgr.shape),
+            "scale_x": 1.0,
+            "scale_y": 1.0,
+        }
+    if target_width <= 0:
+        target_width = max(1, int(round(src_w * (target_height / float(src_h)))))
+    if target_height <= 0:
+        target_height = max(1, int(round(src_h * (target_width / float(src_w)))))
+
+    scale_x = target_width / float(src_w)
+    scale_y = target_height / float(src_h)
+    K_send = np.asarray(K, dtype=np.float64).copy()
+    K_send[0, 0] *= scale_x
+    K_send[0, 2] *= scale_x
+    K_send[1, 1] *= scale_y
+    K_send[1, 2] *= scale_y
+
+    interpolation = cv2.INTER_AREA if target_width < src_w or target_height < src_h else cv2.INTER_LINEAR
+    image_send = cv2.resize(image_bgr, (target_width, target_height), interpolation=interpolation)
+    return image_send, K_send, {
+        "resized": True,
+        "source_shape": list(image_bgr.shape),
+        "sent_shape": list(image_send.shape),
+        "scale_x": scale_x,
+        "scale_y": scale_y,
+    }
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cfg", default=str(DEFAULT_CFG))
@@ -141,6 +182,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, default=1)
     parser.add_argument("--sleep-s", type=float, default=0.5)
     parser.add_argument("--jpeg-quality", type=int, default=85)
+    parser.add_argument("--send-width", type=int, default=0)
+    parser.add_argument("--send-height", type=int, default=0)
     parser.add_argument("--preview-steps", type=int, default=3)
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--upload-timeout-s", type=float, default=60.0)
@@ -184,14 +227,27 @@ def main() -> int:
             state = arm.get_debug_state()
             request_id = f"{utc_stamp()}_{args.tag}_{idx:03d}"
             log(f"step {idx}: encoding JPEG request payload")
+            rgb_send, K_send, image_send_info = resize_image_and_K(
+                frame.rgb,
+                frame.K,
+                args.send_width,
+                args.send_height,
+            )
+            jpeg_b64 = encode_jpeg_b64(rgb_send, args.jpeg_quality)
+            log(
+                f"step {idx}: sending RGB {image_send_info['sent_shape']} "
+                f"jpeg_b64_bytes={len(jpeg_b64)}"
+            )
             payload = {
                 "request_id": request_id,
                 "client_time_utc": datetime.now(timezone.utc).isoformat(),
                 "preview_steps": int(args.preview_steps),
-                "K": np.asarray(frame.K, dtype=np.float64).tolist(),
-                "rgb_jpeg_b64": encode_jpeg_b64(frame.rgb, args.jpeg_quality),
+                "K": np.asarray(K_send, dtype=np.float64).tolist(),
+                "rgb_jpeg_b64": jpeg_b64,
                 "frame_summary": {
-                    "rgb_shape": list(frame.rgb.shape),
+                    "rgb_shape": list(rgb_send.shape),
+                    "source_rgb_shape": list(frame.rgb.shape),
+                    "image_send": image_send_info,
                     "depth_shape": list(frame.depth_m.shape),
                     "depth_valid_ratio": float(np.isfinite(frame.depth_m).mean()),
                 },
@@ -210,7 +266,7 @@ def main() -> int:
             }
             iter_dir = run_dir / f"iter_{idx:03d}"
             iter_dir.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(iter_dir / "rgb_bgr.jpg"), frame.rgb)
+            cv2.imwrite(str(iter_dir / "rgb_sent_bgr.jpg"), rgb_send)
             if args.save_depth:
                 np.save(iter_dir / "depth_m.npy", frame.depth_m)
             request_summary = dict(payload)

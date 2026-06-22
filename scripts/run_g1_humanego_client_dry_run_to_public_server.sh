@@ -12,8 +12,10 @@ UPLOAD_URL="${G1_DIAG_UPLOAD_URL:-http://111.0.22.33:30002/upload}"
 TAG="${G1_HUMANEGO_TAG:-client_dry_run}"
 CFG="${G1_HUMANEGO_CFG:-cfg/inference/g1_serve_bread_right.yaml}"
 STEPS="${G1_HUMANEGO_STEPS:-1}"
-PREVIEW_STEPS="${G1_HUMANEGO_PREVIEW_STEPS:-3}"
-JPEG_QUALITY="${G1_HUMANEGO_JPEG_QUALITY:-85}"
+PREVIEW_STEPS="${G1_HUMANEGO_PREVIEW_STEPS:-1}"
+JPEG_QUALITY="${G1_HUMANEGO_JPEG_QUALITY:-75}"
+SEND_WIDTH="${G1_HUMANEGO_SEND_WIDTH:-320}"
+SEND_HEIGHT="${G1_HUMANEGO_SEND_HEIGHT:-240}"
 TIMEOUT_S="${G1_HUMANEGO_TIMEOUT_S:-120}"
 UPLOAD_TIMEOUT_S="${G1_HUMANEGO_UPLOAD_TIMEOUT_S:-60}"
 SAVE_DEPTH="${G1_HUMANEGO_SAVE_DEPTH:-false}"
@@ -36,6 +38,8 @@ python3 scripts/g1_humanego_client_dry_run.py \
   --steps "$STEPS" \
   --preview-steps "$PREVIEW_STEPS" \
   --jpeg-quality "$JPEG_QUALITY" \
+  --send-width "$SEND_WIDTH" \
+  --send-height "$SEND_HEIGHT" \
   --timeout-s "$TIMEOUT_S" \
   --upload-timeout-s "$UPLOAD_TIMEOUT_S" \
   "$SAVE_DEPTH_ARG" \
