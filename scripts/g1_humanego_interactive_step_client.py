@@ -41,9 +41,11 @@ for path in (PROJECT_ROOT, PROJECT_ROOT / "inference", PROJECT_ROOT / "scripts")
 
 from g1_humanego_client_dry_run import (  # noqa: E402
     encode_jpeg_b64,
+    encode_depth_npz_b64,
     json_safe,
     log,
     post_json,
+    resize_depth_to_shape,
     resize_image_and_K,
     resolve_project_path,
     upload_zip,
@@ -87,7 +89,18 @@ def build_payload(frame: Any, state: dict[str, Any], args: argparse.Namespace, r
     )
     jpeg_b64 = encode_jpeg_b64(rgb_send, args.jpeg_quality)
     log(f"request {request_id}: sending RGB {image_send_info['sent_shape']} jpeg_b64_bytes={len(jpeg_b64)}")
-    return {
+    depth_send_info = {"sent": False}
+    depth_b64 = None
+    if args.send_depth:
+        depth_send = resize_depth_to_shape(frame.depth_m, rgb_send.shape[:2])
+        depth_b64, depth_send_info = encode_depth_npz_b64(depth_send, args.depth_encoding)
+        depth_send_info["sent"] = True
+        depth_send_info["base64_bytes"] = len(depth_b64)
+        log(
+            f"request {request_id}: sending depth {depth_send_info['shape']} "
+            f"encoding={args.depth_encoding} base64_bytes={len(depth_b64)}"
+        )
+    payload = {
         "request_id": request_id,
         "client_time_utc": datetime.now(timezone.utc).isoformat(),
         "preview_steps": 1,
@@ -98,6 +111,7 @@ def build_payload(frame: Any, state: dict[str, Any], args: argparse.Namespace, r
             "source_rgb_shape": list(frame.rgb.shape),
             "image_send": image_send_info,
             "depth_shape": list(frame.depth_m.shape),
+            "depth_send": depth_send_info,
             "depth_valid_ratio": float(np.isfinite(frame.depth_m).mean()),
         },
         "current": {
@@ -113,6 +127,10 @@ def build_payload(frame: Any, state: dict[str, Any], args: argparse.Namespace, r
             "corobot_fk": json_safe(state["corobot_fk"]),
         },
     }
+    if depth_b64 is not None:
+        payload["depth_m_npz_b64"] = depth_b64
+        payload["depth_encoding"] = depth_send_info
+    return payload
 
 
 def select_target(step_preview: dict[str, Any], source: str) -> dict[str, float]:
@@ -180,6 +198,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jpeg-quality", type=int, default=75)
     parser.add_argument("--send-width", type=int, default=320)
     parser.add_argument("--send-height", type=int, default=240)
+    parser.add_argument("--send-depth", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--depth-encoding", choices=["z16", "float16", "float32"], default="z16")
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--upload-url", default="")
     parser.add_argument("--upload-timeout-s", type=float, default=60.0)

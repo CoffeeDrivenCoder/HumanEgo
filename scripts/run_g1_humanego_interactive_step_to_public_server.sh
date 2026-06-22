@@ -19,6 +19,13 @@ SETTLE_S="${G1_HUMANEGO_SETTLE_S:-1.0}"
 JPEG_QUALITY="${G1_HUMANEGO_JPEG_QUALITY:-75}"
 SEND_WIDTH="${G1_HUMANEGO_SEND_WIDTH:-320}"
 SEND_HEIGHT="${G1_HUMANEGO_SEND_HEIGHT:-240}"
+SEND_DEPTH="${G1_HUMANEGO_SEND_DEPTH:-false}"
+DEPTH_ENCODING="${G1_HUMANEGO_DEPTH_ENCODING:-z16}"
+
+SEND_DEPTH_ARG="--no-send-depth"
+if [[ "$SEND_DEPTH" == "true" || "$SEND_DEPTH" == "1" ]]; then
+  SEND_DEPTH_ARG="--send-depth"
+fi
 
 python3 scripts/g1_humanego_interactive_step_client.py \
   --cfg "$CFG" \
@@ -32,5 +39,7 @@ python3 scripts/g1_humanego_interactive_step_client.py \
   --jpeg-quality "$JPEG_QUALITY" \
   --send-width "$SEND_WIDTH" \
   --send-height "$SEND_HEIGHT" \
+  "$SEND_DEPTH_ARG" \
+  --depth-encoding "$DEPTH_ENCODING" \
   --upload-url "$UPLOAD_URL" \
   "$@"

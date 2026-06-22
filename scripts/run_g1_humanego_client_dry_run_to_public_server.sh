@@ -19,6 +19,8 @@ SEND_HEIGHT="${G1_HUMANEGO_SEND_HEIGHT:-240}"
 TIMEOUT_S="${G1_HUMANEGO_TIMEOUT_S:-120}"
 UPLOAD_TIMEOUT_S="${G1_HUMANEGO_UPLOAD_TIMEOUT_S:-60}"
 SAVE_DEPTH="${G1_HUMANEGO_SAVE_DEPTH:-false}"
+SEND_DEPTH="${G1_HUMANEGO_SEND_DEPTH:-false}"
+DEPTH_ENCODING="${G1_HUMANEGO_DEPTH_ENCODING:-z16}"
 CLOSE_CAMERA="${G1_HUMANEGO_CLOSE_CAMERA:-false}"
 
 SAVE_DEPTH_ARG="--no-save-depth"
@@ -29,6 +31,11 @@ fi
 CLOSE_CAMERA_ARG="--no-close-camera"
 if [[ "$CLOSE_CAMERA" == "true" || "$CLOSE_CAMERA" == "1" ]]; then
   CLOSE_CAMERA_ARG="--close-camera"
+fi
+
+SEND_DEPTH_ARG="--no-send-depth"
+if [[ "$SEND_DEPTH" == "true" || "$SEND_DEPTH" == "1" ]]; then
+  SEND_DEPTH_ARG="--send-depth"
 fi
 
 python3 scripts/g1_humanego_client_dry_run.py \
@@ -43,6 +50,8 @@ python3 scripts/g1_humanego_client_dry_run.py \
   --timeout-s "$TIMEOUT_S" \
   --upload-timeout-s "$UPLOAD_TIMEOUT_S" \
   "$SAVE_DEPTH_ARG" \
+  "$SEND_DEPTH_ARG" \
+  --depth-encoding "$DEPTH_ENCODING" \
   "$CLOSE_CAMERA_ARG" \
   --upload-url "$UPLOAD_URL" \
   "$@"

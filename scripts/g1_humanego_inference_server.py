@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from io import BytesIO
 import json
 import sys
 import threading
@@ -43,6 +44,7 @@ from g1_humanego_dry_run import (  # noqa: E402
     resolve_project_path,
 )
 from interfaces import ObjectState  # noqa: E402
+from interfaces import Frame  # noqa: E402
 from policy import ICTPolicy  # noqa: E402
 
 
@@ -62,6 +64,29 @@ def decode_rgb_jpeg(payload: dict[str, Any]) -> np.ndarray:
     if image is None:
         raise ValueError("failed to decode rgb_jpeg_b64")
     return image
+
+
+def decode_depth_npz(payload: dict[str, Any]) -> tuple[np.ndarray | None, dict[str, Any]]:
+    encoded = payload.get("depth_m_npz_b64")
+    if not encoded:
+        return None, {"present": False}
+    raw = base64.b64decode(encoded)
+    with np.load(BytesIO(raw)) as data:
+        depth = np.asarray(data["depth"])
+    info = payload.get("depth_encoding") or {}
+    encoding = info.get("encoding", "z16")
+    if encoding == "z16":
+        depth_m = depth.astype(np.float32) / 1000.0
+    elif encoding in {"float16", "float32"}:
+        depth_m = depth.astype(np.float32)
+    else:
+        raise ValueError(f"unsupported depth encoding from client: {encoding}")
+    return depth_m, {
+        "present": True,
+        "encoding": encoding,
+        "shape": list(depth_m.shape),
+        "raw_npz_bytes": len(raw),
+    }
 
 
 def objects_from_payload(payload: dict[str, Any]) -> dict[str, ObjectState] | None:
@@ -90,12 +115,24 @@ class InferenceRuntime:
     out_dir: Path
     device: str
     save_rgb: bool
+    object_source_override: str
 
     def __post_init__(self) -> None:
         self.cfg = load_cfg(self.cfg_path)
         self.policy = ICTPolicy(self.cfg["policy"], device=self.device)
-        self.anchor_key = self.cfg.get("perception", {}).get("anchor_key", "obj1")
-        self.fixed_objects = load_fixed_objects(self.cfg.get("perception", {}))
+        self.perception_cfg = self.cfg.get("perception", {})
+        self.anchor_key = self.perception_cfg.get("anchor_key", "obj1")
+        self.object_source = str(
+            self.object_source_override
+            or self.perception_cfg.get("object_source", self.perception_cfg.get("dry_run_object_source", "fixed"))
+        ).lower()
+        self.allow_fixed_fallback = bool(self.perception_cfg.get("allow_fixed_object_fallback", True))
+        self.fixed_objects = load_fixed_objects(self.perception_cfg)
+        self.object_pose_estimator = None
+        if self.object_source == "rgbd":
+            from object_pose_rgbd import RGBDObjectPoseEstimator
+
+            self.object_pose_estimator = RGBDObjectPoseEstimator(self.perception_cfg)
         self.T_align = np.asarray(self.cfg["robot"]["T_align"], dtype=np.float64).reshape(4, 4)
         self.max_step_m = float(self.cfg.get("control", {}).get("max_pos_step", 0.03))
         self.preview_steps = int(self.cfg.get("server", {}).get("preview_steps", 3))
@@ -105,6 +142,7 @@ class InferenceRuntime:
     def infer(self, payload: dict[str, Any]) -> dict[str, Any]:
         started = time.time()
         rgb_bgr = decode_rgb_jpeg(payload)
+        depth_m, depth_info = decode_depth_npz(payload)
         h, w = rgb_bgr.shape[:2]
         K = np.asarray(payload["K"], dtype=np.float64).reshape(3, 3)
         current = payload.get("current") or {}
@@ -116,7 +154,31 @@ class InferenceRuntime:
         T_hand_in_cam = T_tcp_in_cam @ self.T_align
         gripper = float(current.get("gripper", 0.0))
 
-        objects = objects_from_payload(payload) or self.fixed_objects
+        object_source_used = "payload"
+        object_error = None
+        objects = objects_from_payload(payload)
+        if objects is None and self.object_source == "rgbd":
+            object_source_used = "rgbd"
+            try:
+                if depth_m is None:
+                    raise ValueError("object_source=rgbd requires depth_m_npz_b64 from client")
+                assert self.object_pose_estimator is not None
+                frame = Frame(rgb=rgb_bgr, depth_m=depth_m.astype(np.float32), K=K.astype(np.float32))
+                objects = self.object_pose_estimator.estimate([frame])
+            except Exception as exc:
+                object_error = {
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+                if not self.allow_fixed_fallback:
+                    raise
+                objects = self.fixed_objects
+                object_source_used = "fixed_fallback_after_rgbd_error"
+        elif objects is None:
+            objects = self.fixed_objects
+            object_source_used = "fixed"
+
         anchor = objects.get(self.anchor_key)
         if anchor is None:
             raise ValueError(f"anchor_key {self.anchor_key!r} not found in objects {sorted(objects.keys())}")
@@ -155,6 +217,7 @@ class InferenceRuntime:
             },
             "input_summary": {
                 "rgb_shape": list(rgb_bgr.shape),
+                "depth": depth_info,
                 "K": K.tolist(),
                 "current_T_tcp_in_cam": matrix_json(T_tcp_in_cam),
                 "current_T_hand_in_cam": matrix_json(T_hand_in_cam),
@@ -166,6 +229,8 @@ class InferenceRuntime:
                     }
                     for key, obj in objects.items()
                 },
+                "object_source_used": object_source_used,
+                "object_error": object_error,
             },
             "policy_preview": preview,
             "latency_s": time.time() - started,
@@ -218,6 +283,7 @@ def make_handler(runtime: InferenceRuntime):
                     "message": "POST G1 state to /infer",
                     "cfg_path": str(runtime.cfg_path),
                     "device": runtime.device,
+                    "object_source": runtime.object_source,
                     "policy_sides": runtime.policy.sides,
                 },
             )
@@ -254,6 +320,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=50051)
     parser.add_argument("--cfg", default=str(DEFAULT_CFG))
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
+    parser.add_argument("--object-source", default="", choices=["", "fixed", "rgbd"])
     parser.add_argument("--out-dir", default=str(PROJECT_ROOT / "g1_humanego_server_runs"))
     parser.add_argument("--save-rgb", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
@@ -265,11 +332,13 @@ def main() -> int:
         out_dir=Path(args.out_dir).expanduser().resolve(),
         device=device,
         save_rgb=bool(args.save_rgb),
+        object_source_override=args.object_source,
     )
     server = ThreadingHTTPServer((args.host, args.port), make_handler(runtime))
     print(f"Listening on http://{args.host}:{args.port}/infer", flush=True)
     print(f"Config: {cfg_path}", flush=True)
     print(f"Device: {device}", flush=True)
+    print(f"Object source: {runtime.object_source}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

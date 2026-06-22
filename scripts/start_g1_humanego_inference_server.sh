@@ -11,6 +11,7 @@ HOST="${G1_HUMANEGO_SERVER_HOST:-0.0.0.0}"
 PORT="${G1_HUMANEGO_SERVER_PORT:-50051}"
 CFG="${G1_HUMANEGO_CFG:-cfg/inference/g1_serve_bread_right.yaml}"
 DEVICE="${G1_HUMANEGO_DEVICE:-auto}"
+OBJECT_SOURCE="${G1_HUMANEGO_OBJECT_SOURCE:-}"
 OUT_DIR="${G1_HUMANEGO_SERVER_OUT_DIR:-./g1_humanego_server_runs}"
 
 python3 scripts/g1_humanego_inference_server.py \
@@ -18,5 +19,6 @@ python3 scripts/g1_humanego_inference_server.py \
   --port "$PORT" \
   --cfg "$CFG" \
   --device "$DEVICE" \
+  --object-source "$OBJECT_SOURCE" \
   --out-dir "$OUT_DIR" \
   "$@"

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from io import BytesIO
 import json
 import os
 import sys
@@ -132,6 +133,36 @@ def encode_jpeg_b64(image_bgr: np.ndarray, quality: int) -> str:
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
+def encode_depth_npz_b64(depth_m: np.ndarray, encoding: str = "z16") -> tuple[str, dict[str, Any]]:
+    depth = np.asarray(depth_m)
+    bio = BytesIO()
+    if encoding == "z16":
+        depth_mm = np.nan_to_num(depth.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        depth_mm = np.clip(depth_mm * 1000.0, 0.0, 65535.0).astype(np.uint16)
+        np.savez_compressed(bio, depth=depth_mm)
+        info = {"encoding": "z16", "unit": "mm", "shape": list(depth_mm.shape), "dtype": str(depth_mm.dtype)}
+    elif encoding == "float16":
+        depth_f16 = np.nan_to_num(depth.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0).astype(np.float16)
+        np.savez_compressed(bio, depth=depth_f16)
+        info = {"encoding": "float16", "unit": "m", "shape": list(depth_f16.shape), "dtype": str(depth_f16.dtype)}
+    elif encoding == "float32":
+        depth_f32 = np.nan_to_num(depth.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        np.savez_compressed(bio, depth=depth_f32)
+        info = {"encoding": "float32", "unit": "m", "shape": list(depth_f32.shape), "dtype": str(depth_f32.dtype)}
+    else:
+        raise ValueError(f"unsupported depth encoding: {encoding}")
+    raw = bio.getvalue()
+    return base64.b64encode(raw).decode("ascii"), {**info, "npz_bytes": len(raw)}
+
+
+def resize_depth_to_shape(depth_m: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+    target_h, target_w = int(target_hw[0]), int(target_hw[1])
+    depth = np.asarray(depth_m, dtype=np.float32)
+    if depth.shape[:2] == (target_h, target_w):
+        return depth
+    return cv2.resize(depth, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+
+
 def resize_image_and_K(
     image_bgr: np.ndarray,
     K: np.ndarray,
@@ -187,6 +218,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preview-steps", type=int, default=3)
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--upload-timeout-s", type=float, default=60.0)
+    parser.add_argument("--send-depth", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--depth-encoding", choices=["z16", "float16", "float32"], default="z16")
     parser.add_argument("--save-depth", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--close-camera", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--upload-url", default="")
@@ -238,6 +271,17 @@ def main() -> int:
                 f"step {idx}: sending RGB {image_send_info['sent_shape']} "
                 f"jpeg_b64_bytes={len(jpeg_b64)}"
             )
+            depth_send_info = {"sent": False}
+            depth_b64 = None
+            if args.send_depth:
+                depth_send = resize_depth_to_shape(frame.depth_m, rgb_send.shape[:2])
+                depth_b64, depth_send_info = encode_depth_npz_b64(depth_send, args.depth_encoding)
+                depth_send_info["sent"] = True
+                depth_send_info["base64_bytes"] = len(depth_b64)
+                log(
+                    f"step {idx}: sending depth {depth_send_info['shape']} "
+                    f"encoding={args.depth_encoding} base64_bytes={len(depth_b64)}"
+                )
             payload = {
                 "request_id": request_id,
                 "client_time_utc": datetime.now(timezone.utc).isoformat(),
@@ -249,6 +293,7 @@ def main() -> int:
                     "source_rgb_shape": list(frame.rgb.shape),
                     "image_send": image_send_info,
                     "depth_shape": list(frame.depth_m.shape),
+                    "depth_send": depth_send_info,
                     "depth_valid_ratio": float(np.isfinite(frame.depth_m).mean()),
                 },
                 "current": {
@@ -264,6 +309,9 @@ def main() -> int:
                     "corobot_fk": json_safe(state["corobot_fk"]),
                 },
             }
+            if depth_b64 is not None:
+                payload["depth_m_npz_b64"] = depth_b64
+                payload["depth_encoding"] = depth_send_info
             iter_dir = run_dir / f"iter_{idx:03d}"
             iter_dir.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(iter_dir / "rgb_sent_bgr.jpg"), rgb_send)

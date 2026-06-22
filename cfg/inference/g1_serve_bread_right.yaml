@@ -21,6 +21,8 @@ perception:
   n_init_frames: 10
   # First robot dry-run uses fixed camera-frame object poses so we can validate
   # policy loading and G1 target conversion before enabling DINO-SAM.
+  object_source: "fixed"  # "fixed" for link tests, "rgbd" for real bread/plate poses on server.
+  allow_fixed_object_fallback: true
   dry_run_object_source: "fixed"
   dry_run_object_poses_cam:
     obj1:
