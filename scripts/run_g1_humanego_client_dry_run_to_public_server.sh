@@ -14,6 +14,14 @@ CFG="${G1_HUMANEGO_CFG:-cfg/inference/g1_serve_bread_right.yaml}"
 STEPS="${G1_HUMANEGO_STEPS:-1}"
 PREVIEW_STEPS="${G1_HUMANEGO_PREVIEW_STEPS:-3}"
 JPEG_QUALITY="${G1_HUMANEGO_JPEG_QUALITY:-85}"
+TIMEOUT_S="${G1_HUMANEGO_TIMEOUT_S:-120}"
+UPLOAD_TIMEOUT_S="${G1_HUMANEGO_UPLOAD_TIMEOUT_S:-60}"
+SAVE_DEPTH="${G1_HUMANEGO_SAVE_DEPTH:-false}"
+
+SAVE_DEPTH_ARG="--no-save-depth"
+if [[ "$SAVE_DEPTH" == "true" || "$SAVE_DEPTH" == "1" ]]; then
+  SAVE_DEPTH_ARG="--save-depth"
+fi
 
 python3 scripts/g1_humanego_client_dry_run.py \
   --cfg "$CFG" \
@@ -22,5 +30,8 @@ python3 scripts/g1_humanego_client_dry_run.py \
   --steps "$STEPS" \
   --preview-steps "$PREVIEW_STEPS" \
   --jpeg-quality "$JPEG_QUALITY" \
+  --timeout-s "$TIMEOUT_S" \
+  --upload-timeout-s "$UPLOAD_TIMEOUT_S" \
+  "$SAVE_DEPTH_ARG" \
   --upload-url "$UPLOAD_URL" \
   "$@"

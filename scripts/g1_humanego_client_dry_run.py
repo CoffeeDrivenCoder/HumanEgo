@@ -44,6 +44,10 @@ def utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
+def log(message: str) -> None:
+    print(f"[g1_humanego_client] {message}", flush=True)
+
+
 def resolve_project_path(path: str | os.PathLike[str]) -> Path:
     path = Path(path).expanduser()
     if path.is_absolute():
@@ -96,14 +100,15 @@ def post_json(url: str, payload: dict[str, Any], timeout_s: float) -> dict[str, 
         headers={
             "Content-Type": "application/json; charset=utf-8",
             "Content-Length": str(len(data)),
+            "Connection": "close",
         },
     )
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         body = resp.read().decode("utf-8", errors="replace")
-        return {"ok": True, "status": resp.status, "body": body, "json": json.loads(body)}
+        return {"ok": True, "status": resp.status, "num_bytes": len(body), "json": json.loads(body)}
 
 
-def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
+def upload_zip(zip_path: Path, upload_url: str, timeout_s: float = 60.0) -> Dict[str, Any]:
     data = zip_path.read_bytes()
     req = urllib.request.Request(
         upload_url,
@@ -113,9 +118,10 @@ def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
             "Content-Type": "application/zip",
             "Content-Length": str(len(data)),
             "X-G1-Diagnostics-Filename": zip_path.name,
+            "Connection": "close",
         },
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         return {"ok": True, "status": resp.status, "response": resp.read().decode("utf-8", errors="replace")}
 
 
@@ -137,6 +143,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jpeg-quality", type=int, default=85)
     parser.add_argument("--preview-steps", type=int, default=3)
     parser.add_argument("--timeout-s", type=float, default=120.0)
+    parser.add_argument("--upload-timeout-s", type=float, default=60.0)
+    parser.add_argument("--save-depth", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--upload-url", default="")
     return parser
 
@@ -163,13 +171,18 @@ def main() -> int:
         from G1Camera import G1HeadRGBDCamera
         from G1RobotArm import G1RobotArmReadOnly
 
+        log("initializing G1 camera")
         cam = G1HeadRGBDCamera(resolve_project_path(cfg["camera"]["cfg_path"]))
+        log("initializing read-only G1 arm state adapter")
         arm = G1RobotArmReadOnly(side="right")
 
         for idx in range(max(1, int(args.steps))):
+            log(f"step {idx}: reading RGB-D frame")
             frame = cam.get_frame()
+            log(f"step {idx}: reading robot TCP/base-camera state")
             state = arm.get_debug_state()
             request_id = f"{utc_stamp()}_{args.tag}_{idx:03d}"
+            log(f"step {idx}: encoding JPEG request payload")
             payload = {
                 "request_id": request_id,
                 "client_time_utc": datetime.now(timezone.utc).isoformat(),
@@ -197,7 +210,8 @@ def main() -> int:
             iter_dir = run_dir / f"iter_{idx:03d}"
             iter_dir.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(iter_dir / "rgb_bgr.jpg"), frame.rgb)
-            np.save(iter_dir / "depth_m.npy", frame.depth_m)
+            if args.save_depth:
+                np.save(iter_dir / "depth_m.npy", frame.depth_m)
             request_summary = dict(payload)
             request_summary.pop("rgb_jpeg_b64", None)
             (iter_dir / "request_summary.json").write_text(
@@ -207,8 +221,14 @@ def main() -> int:
 
             started = time.time()
             try:
+                log(f"step {idx}: POST {args.server_url}")
                 server_result = post_json(args.server_url, payload, args.timeout_s)
                 elapsed = time.time() - started
+                log(
+                    f"step {idx}: server response ok "
+                    f"status={server_result['status']} bytes={server_result['num_bytes']} "
+                    f"duration={elapsed:.3f}s"
+                )
                 (iter_dir / "server_response.json").write_text(
                     json.dumps(json_safe(server_result["json"]), ensure_ascii=False, indent=2),
                     encoding="utf-8",
@@ -218,6 +238,7 @@ def main() -> int:
                     "request_id": request_id,
                     "ok": True,
                     "server_status": server_result["status"],
+                    "server_response_bytes": server_result["num_bytes"],
                     "duration_s": elapsed,
                     "server_response": server_result["json"],
                 }
@@ -254,14 +275,18 @@ def main() -> int:
         json.dumps(json_safe(report), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    log("building local result zip")
     zip_path = make_zip(run_dir)
     upload = None
     if args.upload_url:
         try:
-            upload = upload_zip(zip_path, args.upload_url)
+            log(f"uploading result zip to {args.upload_url}")
+            upload = upload_zip(zip_path, args.upload_url, args.upload_timeout_s)
+            log(f"upload complete status={upload.get('status')}")
         except Exception as exc:
             upload = {"ok": False, "error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc()}
         (run_dir / "upload_result.json").write_text(json.dumps(upload, ensure_ascii=False, indent=2), encoding="utf-8")
+        log("rebuilding zip with upload_result.json")
         zip_path = make_zip(run_dir)
 
     print(json.dumps({"run_dir": str(run_dir), "zip_path": str(zip_path), "upload": upload}, ensure_ascii=False, indent=2))
