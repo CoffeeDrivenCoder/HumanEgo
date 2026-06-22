@@ -145,6 +145,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--upload-timeout-s", type=float, default=60.0)
     parser.add_argument("--save-depth", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--close-camera", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--upload-url", default="")
     return parser
 
@@ -260,14 +261,21 @@ def main() -> int:
     except Exception as exc:
         report.update({"ok": False, "error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc()})
     finally:
-        if cam is not None:
+        if cam is not None and args.close_camera:
             try:
+                log("closing G1 camera")
                 cam.close()
+                log("G1 camera closed")
             except Exception as exc:
                 report["camera_close_error"] = f"{type(exc).__name__}: {exc}"
+        elif cam is not None:
+            report["camera_close_skipped"] = True
+            log("skipping G1 camera close for dry-run to avoid SDK shutdown blocking")
         if arm is not None:
             try:
+                log("closing read-only arm adapter")
                 arm.close()
+                log("read-only arm adapter closed")
             except Exception as exc:
                 report["arm_close_error"] = f"{type(exc).__name__}: {exc}"
 

@@ -17,10 +17,16 @@ JPEG_QUALITY="${G1_HUMANEGO_JPEG_QUALITY:-85}"
 TIMEOUT_S="${G1_HUMANEGO_TIMEOUT_S:-120}"
 UPLOAD_TIMEOUT_S="${G1_HUMANEGO_UPLOAD_TIMEOUT_S:-60}"
 SAVE_DEPTH="${G1_HUMANEGO_SAVE_DEPTH:-false}"
+CLOSE_CAMERA="${G1_HUMANEGO_CLOSE_CAMERA:-false}"
 
 SAVE_DEPTH_ARG="--no-save-depth"
 if [[ "$SAVE_DEPTH" == "true" || "$SAVE_DEPTH" == "1" ]]; then
   SAVE_DEPTH_ARG="--save-depth"
+fi
+
+CLOSE_CAMERA_ARG="--no-close-camera"
+if [[ "$CLOSE_CAMERA" == "true" || "$CLOSE_CAMERA" == "1" ]]; then
+  CLOSE_CAMERA_ARG="--close-camera"
 fi
 
 python3 scripts/g1_humanego_client_dry_run.py \
@@ -33,5 +39,6 @@ python3 scripts/g1_humanego_client_dry_run.py \
   --timeout-s "$TIMEOUT_S" \
   --upload-timeout-s "$UPLOAD_TIMEOUT_S" \
   "$SAVE_DEPTH_ARG" \
+  "$CLOSE_CAMERA_ARG" \
   --upload-url "$UPLOAD_URL" \
   "$@"
