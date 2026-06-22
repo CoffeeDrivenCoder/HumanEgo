@@ -81,6 +81,16 @@ def _dir_size(path):
     return total
 
 
+def _has_extracted_all_data(out, rec):
+    target = os.path.join(out, rec, "preprocess", "all_data")
+    if not os.path.isdir(target):
+        return False
+    try:
+        return any(os.scandir(target))
+    except OSError:
+        return False
+
+
 def _run_threaded(fn):
     """Run fn() in a daemon thread; return (thread, err_holder)."""
     err = {}
@@ -105,7 +115,14 @@ def _bar(*extra):
 
 
 def _download_recording(rec, out, input_only, total):
-    ignore = [f"{rec}/preprocess/*"] if input_only else None
+    ignore = []
+    if input_only:
+        ignore.append(f"{rec}/preprocess/*")
+    elif _has_extracted_all_data(out, rec):
+        # all_data.tar is deleted after extraction by default. On retries, skip
+        # re-downloading it if the extracted all_data/ tree is already present.
+        ignore.append(f"{rec}/preprocess/all_data.tar")
+    ignore = ignore or None
     th, err = _run_threaded(lambda: snapshot_download(
         repo_id=REPO_ID, repo_type="dataset", local_dir=out,
         allow_patterns=[f"{rec}/*"], ignore_patterns=ignore))

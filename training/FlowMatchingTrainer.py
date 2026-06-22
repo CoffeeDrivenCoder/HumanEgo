@@ -60,6 +60,11 @@ from training.FlowMatchingDataloader import (
 from training.FlowMatchingModel import FlowMatchingModel
 from training.FlowMatchingEvaluator import run_teacher_forced_vis
 
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
 console = Console()
 
 # =========================================================
@@ -714,11 +719,21 @@ def plot_eval_curve(history: List[Dict[str, float]], out_dir: str):
     fig.savefig(os.path.join(out_dir, "eval_curve.png"), dpi=180)
     plt.close(fig)
 
+def _wandb_loggable(v) -> bool:
+    return isinstance(v, (int, float, bool, np.integer, np.floating, np.bool_))
+
+def _wandb_prefix(prefix: str, metrics: Dict[str, float]) -> Dict[str, float]:
+    out = {}
+    for k, v in metrics.items():
+        if _wandb_loggable(v):
+            out[f"{prefix}/{k}"] = float(v)
+    return out
+
 
 # =========================
 # -------- Main ------------
 # =========================
-def main(cfg: TrainConfig):
+def main(cfg: TrainConfig, args):
     set_seed(cfg.seed)
     os.makedirs(cfg.out_dir, exist_ok=True)
 
@@ -773,6 +788,32 @@ def main(cfg: TrainConfig):
     config_save_path = os.path.join(cfg.out_dir, "config.json")
     with open(config_save_path, "w", encoding="utf-8") as f:
         json.dump(asdict(cfg), f, indent=4, ensure_ascii=False)
+
+    wandb_run = None
+    if getattr(args, "use_wandb", False):
+        if wandb is None:
+            console.print("[bold yellow]W&B requested but not installed; continuing without logging.[/]")
+        else:
+            wandb_mode = args.wandb_mode or os.getenv("WANDB_MODE", "online")
+            wandb_tags = [t.strip() for t in (args.wandb_tags or "").split(",") if t.strip()]
+            wandb_tags = list(dict.fromkeys([cfg.task, args.job, *wandb_tags]))
+            wandb_run = wandb.init(
+                project=args.wandb_project or f"HumanEgo-{cfg.task}",
+                entity=args.wandb_entity,
+                name=args.wandb_name or f"{cfg.task}-{args.job}",
+                group=args.wandb_group or cfg.task,
+                tags=wandb_tags,
+                mode=wandb_mode,
+                dir=cfg.out_dir,
+                config=asdict(cfg),
+                reinit=True,
+            )
+            wandb.define_metric("epoch")
+            wandb.define_metric("score", step_metric="epoch")
+            wandb.define_metric("train/*", step_metric="epoch")
+            wandb.define_metric("eval/*", step_metric="epoch")
+            import atexit
+            atexit.register(lambda run=wandb_run: run.finish())
     
     console.print(_panel_cfg(cfg))
     
@@ -904,6 +945,13 @@ def main(cfg: TrainConfig):
 
         score = ev["pos_err_w_m"] + ev["rot_err_w_deg"] / 100.0 - ev["grasp_f1_w"] * 0.10
 
+        if wandb_run is not None:
+            wandb_payload = {"epoch": ep, "score": score}
+            wandb_payload.update(_wandb_prefix("train", tr))
+            if ep % cfg.eval_every == 0:
+                wandb_payload.update(_wandb_prefix("eval", ev))
+            wandb_run.log(wandb_payload, step=ep)
+
         if ep % 5 == 0 or ep == cfg.epochs:
             if ema is not None: ema.apply_shadow()
             ckpt = {"epoch": ep, "model": model.state_dict(), "opt": opt.state_dict(), "cfg": cfg.__dict__, "best": best, "global_step": global_step}
@@ -1005,6 +1053,8 @@ def main(cfg: TrainConfig):
 
     console.print(table)
     console.print(Panel(f"Elapsed: {time.time() - t0:.1f}s", title="DONE", expand=False))
+    if wandb_run is not None:
+        wandb_run.finish()
 
 if __name__ == "__main__":
     import argparse
@@ -1096,11 +1146,22 @@ if __name__ == "__main__":
     # ---- Eval Scheduling ----
     parser.add_argument("--eval_every", type=int, default=None)
     parser.add_argument("--vis_eval_every", type=int, default=None)
+
+    # ---- Weights & Biases ----
+    parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_project", type=str, default=None)
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--wandb_name", type=str, default=None)
+    parser.add_argument("--wandb_group", type=str, default=None)
+    parser.add_argument("--wandb_mode", type=str, default=None, choices=["online", "offline", "disabled"])
+    parser.add_argument("--wandb_tags", type=str, default=None, help="Comma-separated tags")
     
     # ---- Paths & Runtime ----
     parser.add_argument("--task", type=str, default=None, help="Task name to auto-search data (e.g., 'downstack_cups')")
     parser.add_argument("--exp", type=str, default=None, help="Experiment group name (e.g., 'AuxTraining'). Enables cfg/training/{task}/{exp}/{job}.yaml and runs/{task}/{exp}/{job}/")
     parser.add_argument("--job", type=str, default=None, required=True)
+    parser.add_argument("--data_root", type=str, default=None, help="Dataset root directory")
+    parser.add_argument("--out_dir", type=str, default=None, help="Directory for checkpoints and training outputs")
     parser.add_argument("--train_data", type=str, nargs="*", default=None, help="Explicit list of training session paths")
     parser.add_argument("--eval_data", type=str, nargs="*", default=None, help="Explicit list of evaluation session paths")
     parser.add_argument("--data_num", type=int, default=None, help="Limit number of training sessions")
@@ -1153,7 +1214,9 @@ if __name__ == "__main__":
             if k == "image_size" and isinstance(v, list):
                 v = tuple(v)
             setattr(cfg, k, v)
-    if args.exp:
+    if args.out_dir:
+        out_dir = args.out_dir
+    elif args.exp:
         out_dir = os.path.join("./runs", cfg.task, args.exp, args.job)
     else:
         out_dir = os.path.join("./runs", cfg.task, args.job)
@@ -1236,6 +1299,7 @@ if __name__ == "__main__":
     if args.vis_eval_every is not None: cfg.vis_eval_every = args.vis_eval_every
     
     if args.task is not None: cfg.task = args.task
+    if args.data_root is not None: cfg.data_root = args.data_root
     if args.train_data is not None and len(args.train_data) > 0: cfg.MPS_PATHS_TRAIN = list(args.train_data)
     if args.eval_data is not None and len(args.eval_data) > 0: cfg.MPS_PATHS_EVAL = list(args.eval_data)
     if args.data_num is not None: cfg.data_num = args.data_num
@@ -1243,7 +1307,7 @@ if __name__ == "__main__":
     if args.num_workers is not None: cfg.num_workers = args.num_workers
     if args.device is not None: cfg.device = args.device
     if args.seed is not None: cfg.seed = args.seed
-    main(cfg)
+    main(cfg, args)
 
 # python -m training.FlowMatchingTrainer --task "serve_bread" --use_cfg --job "00_Baseline"
 # python -m training.FlowMatchingTrainer --task "serve_bread" --use_cfg --job "00_Baseline_Egocentric"

@@ -76,6 +76,37 @@ class RealSenseCamera(Camera):
         self.cam.close()
 
 
+def resolve_project_path(path: str) -> str:
+    """Resolve config paths from cwd first, then from the repo root."""
+    if os.path.isabs(path):
+        return path
+    candidates = [
+        os.path.abspath(path),
+        os.path.join(_ROOT, path),
+        os.path.join(_HERE, path),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
+
+
+def build_camera(cam_cfg_path: str) -> Camera:
+    """Build a camera adapter from a camera config yaml."""
+    cam_cfg_path = resolve_project_path(cam_cfg_path)
+    cam_cfg = load_cfg(cam_cfg_path)
+    cam_type = str((cam_cfg or {}).get("type", "realsense")).lower()
+
+    if cam_type in {"g1_cosine_rgbd", "g1_head_rgbd", "g1"}:
+        from G1Camera import G1HeadRGBDCamera
+        return G1HeadRGBDCamera(cam_cfg_path)
+
+    if cam_type in {"realsense", "camrs", "intel_realsense"}:
+        return RealSenseCamera(cam_cfg_path)
+
+    raise ValueError(f"unsupported camera type `{cam_type}` in {cam_cfg_path}")
+
+
 class TrossenArm(RobotArm):
     """Adapter over the shipped RobotArmTrossen driver."""
     def __init__(self, arm_cfg_path: str):
@@ -109,7 +140,7 @@ class ReferencePerception(Perception):
     The exact same detect→segment→lift→pose / inpaint→render pipeline is used
     at training time (see preprocess/), which is why train and test images match.
     """
-    def __init__(self, cam: RealSenseCamera, cfg: dict):
+    def __init__(self, cam: Camera, cfg: dict):
         self.cam = cam
         self.prompts = cfg["object_prompts"]          # {"obj1": "a green cup .", ...}
         self.erase_prompt = cfg["erase_prompt"]       # e.g. "a robot arm . a gripper ."
@@ -210,7 +241,7 @@ def run(cfg_path: str, device: str = "cuda") -> None:
     done_threshold = cfg["control"].get("done_threshold", 0.8)
 
     # ---- build the stack ----
-    cam = RealSenseCamera(cfg["camera"]["cfg_path"])
+    cam = build_camera(cfg["camera"]["cfg_path"])
     arms: Dict[str, RobotArm] = {s: TrossenArm(cfg["robot"]["cfg_paths"][s]) for s in cfg_sides}
     policy = ICTPolicy(cfg["policy"], device=device)
     controller = TrajectoryController(arms, cfg["control"])

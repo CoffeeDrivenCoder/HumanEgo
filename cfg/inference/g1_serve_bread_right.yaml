@@ -1,0 +1,48 @@
+# HumanEgo serve_bread on Agibot G1, single right hand.
+# FK/control are intentionally not enabled here yet.
+
+policy:
+  ckpt: "/data/wangk/checkpoints/humanego/serve_bread/HumanEgo/latest.pt"
+  num_inference_steps: 20
+
+control:
+  control_hz: 10.0
+  exec_horizon: 8
+  done_threshold: 0.80
+  alpha_pos: 0.50
+  alpha_rot: 0.50
+  max_pos_step: 0.03
+  grasp_threshold: 0.50
+  safe_z_min: -0.12
+  dry_run: true
+
+perception:
+  anchor_key: "obj1"
+  n_init_frames: 10
+  object_prompts:
+    obj1: "a bread ."
+    obj2: "a white plate ."
+  erase_prompt: "a robot arm . a robot gripper ."
+  dinosam_cfg_path: "./cfg/preprocess/base/DINOSAM.yaml"
+  lama_cfg_path: "./cfg/preprocess/base/Lama.yaml"
+  visualkpts_cfg_path: "./cfg/preprocess/base/VisualKpts.yaml"
+
+camera:
+  cfg_path: "./cfg/inference/g1_head_rgbd.yaml"
+
+robot:
+  sides: ["right"]
+  driver: "g1"
+  tcp_frame: "gripper_r_center_link"
+  sdk_link7_frame: "arm_right_link7"
+  fk_status: "corobot_fk_verified"
+  camera_extrinsic_semantics: "T_head_pitch_camera"
+  runtime_camera_transform: "T_base_camera = T_base_head_pitch(q) @ T_head_pitch_camera"
+  cfg_paths: {}
+  # T_align = T_hand_in_tcp. It maps G1 TCP/gripper-center frame to the
+  # HumanEgo/Aria right-hand midpoint frame used by serve_bread.
+  T_align:
+    - [-1.0,  0.0,  0.0,  0.0]
+    - [ 0.0,  0.0,  1.0,  0.0]
+    - [ 0.0,  1.0,  0.0,  0.0]
+    - [ 0.0,  0.0,  0.0,  1.0]
