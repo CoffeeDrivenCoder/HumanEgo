@@ -50,6 +50,7 @@ from g1_humanego_client_dry_run import (  # noqa: E402
     resolve_project_path,
     upload_zip,
 )
+from g1_humanego_dry_run import pose_dict_from_T  # noqa: E402
 
 
 def utc_stamp() -> str:
@@ -133,16 +134,47 @@ def build_payload(frame: Any, state: dict[str, Any], args: argparse.Namespace, r
     return payload
 
 
-def select_target(step_preview: dict[str, Any], source: str) -> dict[str, float]:
+def T_from_pose_dict(pose: dict[str, float]) -> np.ndarray:
+    T = np.eye(4, dtype=np.float64)
+    T[:3, 3] = [pose["x"], pose["y"], pose["z"]]
+    x, y, z, w = [float(pose[k]) for k in ("qx", "qy", "qz", "qw")]
+    n = max(float(np.linalg.norm([x, y, z, w])), 1e-12)
+    x, y, z, w = x / n, y / n, z / n, w / n
+    T[:3, :3] = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+    return T
+
+
+def select_target(step_preview: dict[str, Any], source: str, before_T_link7: np.ndarray) -> dict[str, float]:
     if source == "raw":
         return {k: float(v) for k, v in step_preview["right_pose_flat_raw"].items()}
     if source == "limited":
         return {k: float(v) for k, v in step_preview["right_pose_flat_limited"].items()}
+    if source == "position_keep_orientation":
+        T = T_from_pose_dict({k: float(v) for k, v in step_preview["right_pose_flat_limited"].items()})
+        T[:3, :3] = np.asarray(before_T_link7, dtype=np.float64)[:3, :3]
+        return pose_dict_from_T(T)
     raise ValueError(f"unknown target source: {source}")
 
 
 def position_from_pose_dict(pose: dict[str, float]) -> np.ndarray:
     return np.array([pose["x"], pose["y"], pose["z"]], dtype=np.float64)
+
+
+def object_position_in_base(response: dict[str, Any], current_state: dict[str, Any], object_key: str) -> np.ndarray | None:
+    objects = response.get("input_summary", {}).get("objects", {})
+    obj = objects.get(object_key)
+    if not obj:
+        return None
+    T_obj_cam = np.asarray(obj["T_in_cam"], dtype=np.float64)
+    T_base_camera = np.asarray(current_state["T_base_camera"], dtype=np.float64)
+    return (T_base_camera @ T_obj_cam)[:3, 3]
 
 
 def call_ee_control(controller: Any, pose: dict[str, float], side: str, lifetime: float) -> dict[str, Any]:
@@ -191,7 +223,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tag", default="interactive_step")
     parser.add_argument("--side", choices=["right", "left"], default="right")
     parser.add_argument("--max-steps", type=int, default=20)
-    parser.add_argument("--target-source", choices=["limited", "raw"], default="limited")
+    parser.add_argument("--target-source", choices=["position_keep_orientation", "limited", "raw"], default="position_keep_orientation")
+    parser.add_argument("--approach-object-key", default="obj1")
     parser.add_argument("--confirm-control", default="")
     parser.add_argument("--lifetime", type=float, default=0.5)
     parser.add_argument("--settle-s", type=float, default=1.0)
@@ -268,9 +301,22 @@ def main() -> int:
             )
 
             step_preview = response["policy_preview"]["sides"][args.side][0]
-            target_pose = select_target(step_preview, args.target_source)
+            target_pose = select_target(step_preview, args.target_source, before_T_link7)
             target_delta = position_from_pose_dict(target_pose) - before_T_link7[:3, 3]
             target_delta_norm = float(np.linalg.norm(target_delta))
+            object_base = object_position_in_base(response, state, args.approach_object_key)
+            approach_metrics = None
+            if object_base is not None:
+                before_dist = float(np.linalg.norm(before_T_link7[:3, 3] - object_base))
+                target_dist = float(np.linalg.norm(position_from_pose_dict(target_pose) - object_base))
+                approach_metrics = {
+                    "object_key": args.approach_object_key,
+                    "object_position_in_base": object_base.tolist(),
+                    "before_link7_to_object_m": before_dist,
+                    "target_link7_to_object_m": target_dist,
+                    "target_minus_before_m": target_dist - before_dist,
+                    "closer": bool(target_dist < before_dist),
+                }
 
             print("\n=== HumanEgo proposed step ===")
             print(f"step: {idx}")
@@ -280,6 +326,13 @@ def main() -> int:
             print(f"server raw_delta_norm_m: {step_preview['safety_translation_limit']['raw_delta_norm_m']:.4f}")
             print(f"server clipped: {step_preview['safety_translation_limit']['clipped']}")
             print(f"gripper target raw: {step_preview['gripper_g1_raw_0_open_120_closed']:.2f} / 120 (not executed)")
+            if approach_metrics:
+                print(
+                    f"distance link7->{args.approach_object_key}: "
+                    f"before={approach_metrics['before_link7_to_object_m']:.4f}m, "
+                    f"target={approach_metrics['target_link7_to_object_m']:.4f}m, "
+                    f"delta={approach_metrics['target_minus_before_m']:+.4f}m"
+                )
             print(f"right_pose: {compact_pose(target_pose)}")
 
             operator = prompt_operator()
@@ -291,6 +344,7 @@ def main() -> int:
                 "target_pose": target_pose,
                 "target_delta_m": target_delta.tolist(),
                 "target_delta_norm_m": target_delta_norm,
+                "approach_metrics": approach_metrics,
                 "operator_input": operator,
                 "server_response": response,
             }
@@ -324,10 +378,25 @@ def main() -> int:
             step_record["after_T_link7_in_base"] = after_T_link7.tolist()
             step_record["observed_delta_m"] = observed_delta.tolist()
             step_record["observed_delta_norm_m"] = float(np.linalg.norm(observed_delta))
+            if object_base is not None:
+                after_dist = float(np.linalg.norm(after_T_link7[:3, 3] - object_base))
+                step_record["observed_approach_metrics"] = {
+                    "object_key": args.approach_object_key,
+                    "before_link7_to_object_m": approach_metrics["before_link7_to_object_m"] if approach_metrics else None,
+                    "after_link7_to_object_m": after_dist,
+                    "after_minus_before_m": after_dist - (approach_metrics["before_link7_to_object_m"] if approach_metrics else after_dist),
+                    "closer": bool(approach_metrics and after_dist < approach_metrics["before_link7_to_object_m"]),
+                }
             log(
                 f"step {idx}: observed_delta={observed_delta.tolist()} "
                 f"norm={np.linalg.norm(observed_delta):.4f}"
             )
+            if object_base is not None:
+                log(
+                    f"step {idx}: observed link7->{args.approach_object_key} "
+                    f"distance {step_record['observed_approach_metrics']['after_link7_to_object_m']:.4f}m "
+                    f"delta={step_record['observed_approach_metrics']['after_minus_before_m']:+.4f}m"
+                )
             report["steps"].append(step_record)
             (step_dir / "step_record.json").write_text(
                 json.dumps(json_safe(step_record), ensure_ascii=False, indent=2),
