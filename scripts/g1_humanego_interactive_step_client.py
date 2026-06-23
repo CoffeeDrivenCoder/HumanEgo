@@ -53,6 +53,9 @@ from g1_humanego_client_dry_run import (  # noqa: E402
 from g1_humanego_dry_run import pose_dict_from_T  # noqa: E402
 
 
+EPS = 1e-12
+
+
 def utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
@@ -173,6 +176,64 @@ def position_from_pose_dict(pose: dict[str, float]) -> np.ndarray:
     return np.array([pose["x"], pose["y"], pose["z"]], dtype=np.float64)
 
 
+def rotation_angle_deg(R_delta: np.ndarray) -> float:
+    R_delta = np.asarray(R_delta, dtype=np.float64).reshape(3, 3)
+    value = (float(np.trace(R_delta)) - 1.0) * 0.5
+    return float(np.degrees(np.arccos(np.clip(value, -1.0, 1.0))))
+
+
+def limited_rotation(R_start: np.ndarray, R_target: np.ndarray, max_angle_deg: float) -> tuple[np.ndarray, dict[str, Any]]:
+    R_start = np.asarray(R_start, dtype=np.float64).reshape(3, 3)
+    R_target = np.asarray(R_target, dtype=np.float64).reshape(3, 3)
+    R_delta = R_target @ R_start.T
+    angle_deg = rotation_angle_deg(R_delta)
+    max_angle_deg = abs(float(max_angle_deg))
+    if max_angle_deg <= 0.0 or angle_deg <= max_angle_deg:
+        return R_target, {
+            "raw_angle_deg": angle_deg,
+            "max_angle_deg": max_angle_deg,
+            "clipped": False,
+            "applied_angle_deg": angle_deg,
+        }
+
+    angle_rad = np.radians(angle_deg)
+    axis = np.array(
+        [
+            R_delta[2, 1] - R_delta[1, 2],
+            R_delta[0, 2] - R_delta[2, 0],
+            R_delta[1, 0] - R_delta[0, 1],
+        ],
+        dtype=np.float64,
+    )
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm <= EPS or abs(np.sin(angle_rad)) <= EPS:
+        return R_start, {
+            "raw_angle_deg": angle_deg,
+            "max_angle_deg": max_angle_deg,
+            "clipped": True,
+            "applied_angle_deg": 0.0,
+            "degenerate_axis": True,
+        }
+    axis /= axis_norm
+    step_rad = np.radians(max_angle_deg)
+    K = np.array(
+        [
+            [0.0, -axis[2], axis[1]],
+            [axis[2], 0.0, -axis[0]],
+            [-axis[1], axis[0], 0.0],
+        ],
+        dtype=np.float64,
+    )
+    R_step = np.eye(3, dtype=np.float64) + np.sin(step_rad) * K + (1.0 - np.cos(step_rad)) * (K @ K)
+    return R_step @ R_start, {
+        "raw_angle_deg": angle_deg,
+        "max_angle_deg": max_angle_deg,
+        "clipped": True,
+        "applied_angle_deg": max_angle_deg,
+        "axis": axis.tolist(),
+    }
+
+
 def object_position_in_base(response: dict[str, Any], current_state: dict[str, Any], object_key: str) -> np.ndarray | None:
     objects = response.get("input_summary", {}).get("objects", {})
     obj = objects.get(object_key)
@@ -188,6 +249,7 @@ def adapt_target_pose(
     before_T_link7: np.ndarray,
     mode: str,
     axis_step_m: float,
+    max_orientation_deg: float,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     adapted = dict(target_pose)
     current_pose = pose_dict_from_T(before_T_link7)
@@ -214,6 +276,24 @@ def adapt_target_pose(
             "selected_axis": ["x", "y", "z"][axis],
             "axis_step_m": step,
             "axis_step_limit_m": float(abs(axis_step_m)),
+        }
+
+    if mode in {"orientation_only", "position_orientation_limited"}:
+        T_target = T_from_pose_dict(target_pose)
+        T_adapted = T_target.copy()
+        R_limited, rotation_info = limited_rotation(
+            before_T_link7[:3, :3],
+            T_target[:3, :3],
+            max_orientation_deg,
+        )
+        T_adapted[:3, :3] = R_limited
+        if mode == "orientation_only":
+            T_adapted[:3, 3] = before_T_link7[:3, 3]
+        adapted = pose_dict_from_T(T_adapted)
+        return adapted, {
+            "mode": mode,
+            "raw_delta_m": raw_delta.tolist(),
+            "orientation_limit": rotation_info,
         }
 
     raise ValueError(f"unknown target adapter: {mode}")
@@ -311,8 +391,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--target-source", choices=["position_keep_orientation", "limited", "raw"], default="position_keep_orientation")
     parser.add_argument("--approach-object-key", default="obj1")
-    parser.add_argument("--target-adapter", choices=["full", "position_only", "axis_only"], default="full")
+    parser.add_argument(
+        "--target-adapter",
+        choices=["full", "position_only", "axis_only", "orientation_only", "position_orientation_limited"],
+        default="full",
+    )
     parser.add_argument("--axis-step-m", type=float, default=0.01)
+    parser.add_argument("--max-orientation-deg", type=float, default=10.0)
     parser.add_argument("--confirm-control", default="")
     parser.add_argument("--lifetime", type=float, default=0.5)
     parser.add_argument("--send-hz", type=float, default=10.0)
@@ -400,9 +485,12 @@ def main() -> int:
                 before_T_link7,
                 args.target_adapter,
                 args.axis_step_m,
+                args.max_orientation_deg,
             )
             target_delta = position_from_pose_dict(target_pose) - before_T_link7[:3, 3]
             target_delta_norm = float(np.linalg.norm(target_delta))
+            target_T_link7 = T_from_pose_dict(target_pose)
+            target_rotation_delta_deg = rotation_angle_deg(target_T_link7[:3, :3] @ before_T_link7[:3, :3].T)
             object_base = object_position_in_base(response, state, args.approach_object_key)
             approach_metrics = None
             if object_base is not None:
@@ -427,6 +515,15 @@ def main() -> int:
             print(f"target_source: {args.target_source}")
             print(f"target_adapter: {args.target_adapter}")
             print(f"target_delta_m: {target_delta.tolist()}  norm={target_delta_norm:.4f}")
+            print(f"target_rotation_delta_deg: {target_rotation_delta_deg:.2f}")
+            if "orientation_limit" in adapter_info:
+                orientation_limit = adapter_info["orientation_limit"]
+                print(
+                    "orientation_limit: "
+                    f"raw={orientation_limit['raw_angle_deg']:.2f}deg, "
+                    f"applied={orientation_limit['applied_angle_deg']:.2f}deg, "
+                    f"clipped={orientation_limit['clipped']}"
+                )
             print(f"server raw_delta_norm_m: {step_preview['safety_translation_limit']['raw_delta_norm_m']:.4f}")
             print(f"server clipped: {step_preview['safety_translation_limit']['clipped']}")
             print(f"gripper target raw: {step_preview['gripper_g1_raw_0_open_120_closed']:.2f} / 120 (not executed)")
@@ -451,6 +548,7 @@ def main() -> int:
                 "target_adapter_info": adapter_info,
                 "target_delta_m": target_delta.tolist(),
                 "target_delta_norm_m": target_delta_norm,
+                "target_rotation_delta_deg": target_rotation_delta_deg,
                 "approach_metrics": approach_metrics,
                 "operator_input": operator,
                 "server_response": response,
@@ -503,6 +601,9 @@ def main() -> int:
             step_record["settled_delta_norm_m"] = float(np.linalg.norm(observed_delta))
             step_record["observed_delta_m"] = observed_delta.tolist()
             step_record["observed_delta_norm_m"] = float(np.linalg.norm(observed_delta))
+            step_record["observed_rotation_delta_deg"] = rotation_angle_deg(
+                after_T_link7[:3, :3] @ before_T_link7[:3, :3].T
+            )
             if object_base is not None:
                 after_dist = float(np.linalg.norm(after_T_link7[:3, 3] - object_base))
                 step_record["observed_approach_metrics"] = {
@@ -514,7 +615,8 @@ def main() -> int:
                 }
             log(
                 f"step {idx}: settled_delta={observed_delta.tolist()} "
-                f"norm={np.linalg.norm(observed_delta):.4f}"
+                f"norm={np.linalg.norm(observed_delta):.4f} "
+                f"rot_deg={step_record['observed_rotation_delta_deg']:.2f}"
             )
             if object_base is not None:
                 log(
