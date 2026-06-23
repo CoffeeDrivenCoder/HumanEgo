@@ -23,6 +23,9 @@ TARGET_SOURCE="${G1_HUMANEGO_TARGET_SOURCE:-position_keep_orientation}"
 TARGET_ADAPTER="${G1_HUMANEGO_TARGET_ADAPTER:-full}"
 AXIS_STEP_M="${G1_HUMANEGO_AXIS_STEP_M:-0.01}"
 MAX_ORIENTATION_DEG="${G1_HUMANEGO_MAX_ORIENTATION_DEG:-10}"
+PROBE_AXIS="${G1_HUMANEGO_PROBE_AXIS:-z}"
+PROBE_DEG="${G1_HUMANEGO_PROBE_DEG:-10}"
+PROBE_FRAME="${G1_HUMANEGO_PROBE_FRAME:-local}"
 LIFETIME="${G1_HUMANEGO_LIFETIME:-0.5}"
 SEND_HZ="${G1_HUMANEGO_SEND_HZ:-10}"
 EXECUTE_S="${G1_HUMANEGO_EXECUTE_S:-1.0}"
@@ -52,6 +55,9 @@ python3 scripts/g1_humanego_interactive_step_client.py \
   --target-adapter "$TARGET_ADAPTER" \
   --axis-step-m "$AXIS_STEP_M" \
   --max-orientation-deg "$MAX_ORIENTATION_DEG" \
+  --probe-axis "$PROBE_AXIS" \
+  --probe-deg "$PROBE_DEG" \
+  --probe-frame "$PROBE_FRAME" \
   --lifetime "$LIFETIME" \
   --send-hz "$SEND_HZ" \
   --execute-s "$EXECUTE_S" \

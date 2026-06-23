@@ -182,6 +182,38 @@ def rotation_angle_deg(R_delta: np.ndarray) -> float:
     return float(np.degrees(np.arccos(np.clip(value, -1.0, 1.0))))
 
 
+def R_axis(axis: str, angle_deg: float) -> np.ndarray:
+    axis = axis.lower()
+    angle = np.radians(float(angle_deg))
+    c, s = float(np.cos(angle)), float(np.sin(angle))
+    if axis == "x":
+        return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]], dtype=np.float64)
+    if axis == "y":
+        return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], dtype=np.float64)
+    if axis == "z":
+        return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+    raise ValueError(f"unknown rotation axis {axis!r}; expected x/y/z")
+
+
+def rotation_vector_from_delta(R_delta: np.ndarray) -> np.ndarray:
+    R_delta = np.asarray(R_delta, dtype=np.float64).reshape(3, 3)
+    angle = np.radians(rotation_angle_deg(R_delta))
+    if abs(angle) <= EPS:
+        return np.zeros(3, dtype=np.float64)
+    axis = np.array(
+        [
+            R_delta[2, 1] - R_delta[1, 2],
+            R_delta[0, 2] - R_delta[2, 0],
+            R_delta[1, 0] - R_delta[0, 1],
+        ],
+        dtype=np.float64,
+    )
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm <= EPS:
+        return np.zeros(3, dtype=np.float64)
+    return axis / axis_norm * np.degrees(angle)
+
+
 def limited_rotation(R_start: np.ndarray, R_target: np.ndarray, max_angle_deg: float) -> tuple[np.ndarray, dict[str, Any]]:
     R_start = np.asarray(R_start, dtype=np.float64).reshape(3, 3)
     R_target = np.asarray(R_target, dtype=np.float64).reshape(3, 3)
@@ -250,6 +282,9 @@ def adapt_target_pose(
     mode: str,
     axis_step_m: float,
     max_orientation_deg: float,
+    probe_axis: str,
+    probe_deg: float,
+    probe_frame: str,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     adapted = dict(target_pose)
     current_pose = pose_dict_from_T(before_T_link7)
@@ -294,6 +329,26 @@ def adapt_target_pose(
             "mode": mode,
             "raw_delta_m": raw_delta.tolist(),
             "orientation_limit": rotation_info,
+        }
+
+    if mode == "orientation_probe":
+        T_adapted = np.asarray(before_T_link7, dtype=np.float64).copy()
+        R_probe = R_axis(probe_axis, probe_deg)
+        if probe_frame == "local":
+            T_adapted[:3, :3] = before_T_link7[:3, :3] @ R_probe
+        elif probe_frame == "base":
+            T_adapted[:3, :3] = R_probe @ before_T_link7[:3, :3]
+        else:
+            raise ValueError(f"unknown probe frame {probe_frame!r}; expected local/base")
+        adapted = pose_dict_from_T(T_adapted)
+        R_delta_base = T_adapted[:3, :3] @ before_T_link7[:3, :3].T
+        return adapted, {
+            "mode": mode,
+            "raw_delta_m": raw_delta.tolist(),
+            "probe_axis": probe_axis,
+            "probe_deg": float(probe_deg),
+            "probe_frame": probe_frame,
+            "target_rotation_vector_base_deg": rotation_vector_from_delta(R_delta_base).tolist(),
         }
 
     raise ValueError(f"unknown target adapter: {mode}")
@@ -393,11 +448,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--approach-object-key", default="obj1")
     parser.add_argument(
         "--target-adapter",
-        choices=["full", "position_only", "axis_only", "orientation_only", "position_orientation_limited"],
+        choices=[
+            "full",
+            "position_only",
+            "axis_only",
+            "orientation_only",
+            "position_orientation_limited",
+            "orientation_probe",
+        ],
         default="full",
     )
     parser.add_argument("--axis-step-m", type=float, default=0.01)
     parser.add_argument("--max-orientation-deg", type=float, default=10.0)
+    parser.add_argument("--probe-axis", choices=["x", "y", "z"], default="z")
+    parser.add_argument("--probe-deg", type=float, default=10.0)
+    parser.add_argument("--probe-frame", choices=["local", "base"], default="local")
     parser.add_argument("--confirm-control", default="")
     parser.add_argument("--lifetime", type=float, default=0.5)
     parser.add_argument("--send-hz", type=float, default=10.0)
@@ -486,6 +551,9 @@ def main() -> int:
                 args.target_adapter,
                 args.axis_step_m,
                 args.max_orientation_deg,
+                args.probe_axis,
+                args.probe_deg,
+                args.probe_frame,
             )
             target_delta = position_from_pose_dict(target_pose) - before_T_link7[:3, 3]
             target_delta_norm = float(np.linalg.norm(target_delta))
@@ -523,6 +591,14 @@ def main() -> int:
                     f"raw={orientation_limit['raw_angle_deg']:.2f}deg, "
                     f"applied={orientation_limit['applied_angle_deg']:.2f}deg, "
                     f"clipped={orientation_limit['clipped']}"
+                )
+            if adapter_info.get("mode") == "orientation_probe":
+                print(
+                    "orientation_probe: "
+                    f"axis={adapter_info['probe_axis']}, "
+                    f"deg={adapter_info['probe_deg']:+.2f}, "
+                    f"frame={adapter_info['probe_frame']}, "
+                    f"target_rotvec_base_deg={adapter_info['target_rotation_vector_base_deg']}"
                 )
             print(f"server raw_delta_norm_m: {step_preview['safety_translation_limit']['raw_delta_norm_m']:.4f}")
             print(f"server clipped: {step_preview['safety_translation_limit']['clipped']}")
@@ -604,6 +680,9 @@ def main() -> int:
             step_record["observed_rotation_delta_deg"] = rotation_angle_deg(
                 after_T_link7[:3, :3] @ before_T_link7[:3, :3].T
             )
+            step_record["observed_rotation_vector_base_deg"] = rotation_vector_from_delta(
+                after_T_link7[:3, :3] @ before_T_link7[:3, :3].T
+            ).tolist()
             if object_base is not None:
                 after_dist = float(np.linalg.norm(after_T_link7[:3, 3] - object_base))
                 step_record["observed_approach_metrics"] = {
