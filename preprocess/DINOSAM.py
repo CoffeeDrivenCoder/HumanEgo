@@ -39,6 +39,22 @@ from utils.utils_vis import draw_glass_rect, draw_status_bar, C_CYAN, C_GREEN, C
 from utils.utils_io import load_cfg
 
 
+def _cfg_value(cfg, key, default=None):
+    try:
+        value = getattr(cfg, key)
+    except Exception:
+        return default
+    return default if value in (None, "") else value
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def run_dinosam_subprocess(mps_path: str, cfg_path: str, export_video: bool = True, export_gif: bool = True):
     """
     Utility function to run this script as a subprocess.
@@ -70,12 +86,54 @@ class DINOSAMEngine:
     def __init__(self, cfg):
         self.cfg = cfg
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        local_files_only = _truthy(
+            os.getenv("HUMANEGO_HF_LOCAL_ONLY")
+            or os.getenv("HF_HUB_OFFLINE")
+            or _cfg_value(self.cfg, "hf_local_files_only", False)
+        )
+        dino_source = (
+            os.getenv("HUMANEGO_DINO_MODEL_PATH")
+            or _cfg_value(self.cfg, "dino_local_path")
+            or self.cfg.dino_model_id
+        )
+        sam2_ckpt_path = (
+            os.getenv("HUMANEGO_SAM2_CHECKPOINT")
+            or _cfg_value(self.cfg, "sam2_checkpoint_path")
+        )
         
         print(f"║ [System] Initializing Models on {self.device}...")
-        self.processor = AutoProcessor.from_pretrained(self.cfg.dino_model_id)
-        self.dino_model = AutoModelForZeroShotObjectDetection.from_pretrained(self.cfg.dino_model_id).to(self.device)
+        print(f"║ [System] GroundingDINO source: {dino_source} | local_files_only={local_files_only}")
+        try:
+            self.processor = AutoProcessor.from_pretrained(dino_source, local_files_only=local_files_only)
+            self.dino_model = AutoModelForZeroShotObjectDetection.from_pretrained(
+                dino_source,
+                local_files_only=local_files_only,
+            ).to(self.device)
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to load GroundingDINO. Pre-download the model or set "
+                "HUMANEGO_DINO_MODEL_PATH to a local snapshot directory. "
+                "Set HUMANEGO_HF_LOCAL_ONLY=1 when running from cache/offline."
+            ) from exc
         
-        ckpt_path = hf_hub_download(repo_id=self.cfg.sam2_repo_id, filename=self.cfg.sam2_checkpoint_name)
+        if sam2_ckpt_path:
+            ckpt_path = os.path.expanduser(str(sam2_ckpt_path))
+            if not os.path.exists(ckpt_path):
+                raise FileNotFoundError(f"SAM2 checkpoint not found: {ckpt_path}")
+        else:
+            try:
+                ckpt_path = hf_hub_download(
+                    repo_id=self.cfg.sam2_repo_id,
+                    filename=self.cfg.sam2_checkpoint_name,
+                    local_files_only=local_files_only,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Failed to load SAM2 checkpoint. Pre-download the checkpoint or set "
+                    "HUMANEGO_SAM2_CHECKPOINT to a local .pt file. "
+                    "Set HUMANEGO_HF_LOCAL_ONLY=1 when running from cache/offline."
+                ) from exc
+        print(f"║ [System] SAM2 checkpoint: {ckpt_path}")
         self.predictor = SAM2ImagePredictor(build_sam2(self.cfg.sam2_config, ckpt_path, device=self.device))
 
     def predict_frame_internal(self, image_np, text_prompt):
