@@ -26,6 +26,9 @@ except ImportError:  # pragma: no cover
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PARAMETER_PY = PROJECT_ROOT / "G1" / "parameter.py"
+HEAD_YAW_RAD_ABS_LIMIT = 1.5708
+HEAD_PITCH_RAD_ABS_LIMIT = 0.5233
+HEAD_UNIT_LIMIT_MARGIN_RAD = 0.05
 
 
 def load_module(path: Path, name: str):
@@ -87,6 +90,27 @@ def normalize_angle_maybe_degrees(value: float) -> float:
     return value
 
 
+def normalize_head_joint_states_rad(head_states: Any) -> list[float]:
+    """Return G1 head yaw/pitch in radians.
+
+    RobotDds can expose head states in degrees. The head pair must be converted
+    together: a yaw like 4 deg is below 2*pi, but if pitch is 10 deg the whole
+    pair is degree-valued.
+    """
+    values = coerce_state_list(head_states)
+    if len(values) < 2:
+        return values
+    yaw, pitch = values[:2]
+    looks_like_degrees = (
+        abs(yaw) > HEAD_YAW_RAD_ABS_LIMIT + HEAD_UNIT_LIMIT_MARGIN_RAD
+        or abs(pitch) > HEAD_PITCH_RAD_ABS_LIMIT + HEAD_UNIT_LIMIT_MARGIN_RAD
+    )
+    if looks_like_degrees:
+        converted = [math.radians(v) for v in values]
+        return converted
+    return values
+
+
 def compute_corobot_head_pitch_in_base(head_states: Any, waist_states: Any, urdf_path: str | None = None) -> Dict[str, Any]:
     from corobot.utils.kinematics import Kinematics
 
@@ -96,10 +120,11 @@ def compute_corobot_head_pitch_in_base(head_states: Any, waist_states: Any, urdf
 
         resolved_urdf = str((_find_urdf_solver_dir() / "A2D_viz.urdf").resolve())
 
-    head = coerce_state_list(head_states)
+    raw_head = coerce_state_list(head_states)
+    head = normalize_head_joint_states_rad(raw_head)
     waist = coerce_state_list(waist_states)
-    head_yaw = normalize_angle_maybe_degrees(head[0])
-    head_pitch = normalize_angle_maybe_degrees(head[1])
+    head_yaw = float(head[0])
+    head_pitch = float(head[1])
     waist_pitch = normalize_angle_maybe_degrees(waist[0])
     waist_height = float(waist[1])
 
@@ -108,7 +133,7 @@ def compute_corobot_head_pitch_in_base(head_states: Any, waist_states: Any, urdf
     xyzquat = kinematics.compute_head_fk(head_yaw, head_pitch, waist_pitch, waist_height)
     return {
         "urdf_path": str(resolved_urdf),
-        "raw_head_states": head,
+        "raw_head_states": raw_head,
         "raw_waist_states": waist,
         "used": {
             "head_yaw_rad": head_yaw,
