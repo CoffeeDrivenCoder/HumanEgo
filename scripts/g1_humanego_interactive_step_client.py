@@ -276,6 +276,77 @@ def object_position_in_base(response: dict[str, Any], current_state: dict[str, A
     return (T_base_camera @ T_obj_cam)[:3, 3]
 
 
+def axis_alignment_to_object(
+    T_link7_in_base: np.ndarray,
+    T_tcp_in_link7: np.ndarray,
+    object_base: np.ndarray,
+) -> dict[str, Any]:
+    T_tcp_in_base = np.asarray(T_link7_in_base, dtype=np.float64) @ np.asarray(T_tcp_in_link7, dtype=np.float64)
+    tcp_pos = T_tcp_in_base[:3, 3]
+    to_object = np.asarray(object_base, dtype=np.float64).reshape(3) - tcp_pos
+    dist = float(np.linalg.norm(to_object))
+    if dist <= EPS:
+        return {
+            "ok": False,
+            "reason": "tcp is at object position",
+            "tcp_position_in_base": tcp_pos.tolist(),
+            "tcp_to_object_dist_m": dist,
+        }
+
+    direction = to_object / dist
+    axes: dict[str, dict[str, float]] = {}
+    for idx, name in enumerate(("x", "y", "z")):
+        axis_vec = T_tcp_in_base[:3, idx]
+        axis_vec = axis_vec / max(float(np.linalg.norm(axis_vec)), EPS)
+        for sign, prefix in ((1.0, "+"), (-1.0, "-")):
+            signed_axis = sign * axis_vec
+            dot = float(np.clip(np.dot(signed_axis, direction), -1.0, 1.0))
+            axes[f"{prefix}{name}"] = {
+                "dot_to_object": dot,
+                "angle_to_object_deg": float(np.degrees(np.arccos(dot))),
+            }
+
+    best_axis = min(axes, key=lambda key: axes[key]["angle_to_object_deg"])
+    return {
+        "ok": True,
+        "tcp_position_in_base": tcp_pos.tolist(),
+        "object_position_in_base": np.asarray(object_base, dtype=np.float64).reshape(3).tolist(),
+        "object_vector_from_tcp_m": to_object.tolist(),
+        "tcp_to_object_dist_m": dist,
+        "axes": axes,
+        "best_axis": best_axis,
+        "best_angle_to_object_deg": axes[best_axis]["angle_to_object_deg"],
+        "best_dot_to_object": axes[best_axis]["dot_to_object"],
+    }
+
+
+def alignment_improvement(current: dict[str, Any], target: dict[str, Any]) -> dict[str, Any] | None:
+    if not current or not target or not current.get("ok") or not target.get("ok"):
+        return None
+    target_axis = target["best_axis"]
+    current_angle = current["axes"][target_axis]["angle_to_object_deg"]
+    target_angle = target["axes"][target_axis]["angle_to_object_deg"]
+    return {
+        "target_best_axis": target_axis,
+        "current_angle_for_target_axis_deg": current_angle,
+        "target_angle_for_target_axis_deg": target_angle,
+        "angle_reduction_deg": current_angle - target_angle,
+    }
+
+
+def compact_alignment(label: str, alignment: dict[str, Any], improvement: dict[str, Any] | None = None) -> str:
+    if not alignment or not alignment.get("ok"):
+        return f"{label}: unavailable"
+    text = (
+        f"{label}: best_axis={alignment['best_axis']} "
+        f"angle={alignment['best_angle_to_object_deg']:.1f}deg "
+        f"dist={alignment['tcp_to_object_dist_m']:.3f}m"
+    )
+    if improvement:
+        text += f" improve={improvement['angle_reduction_deg']:+.1f}deg"
+    return text
+
+
 def adapt_target_pose(
     target_pose: dict[str, float],
     before_T_link7: np.ndarray,
@@ -557,10 +628,16 @@ def main() -> int:
             )
             target_delta = position_from_pose_dict(target_pose) - before_T_link7[:3, 3]
             target_delta_norm = float(np.linalg.norm(target_delta))
+            raw_target_T_link7 = T_from_pose_dict(raw_target_pose)
             target_T_link7 = T_from_pose_dict(target_pose)
             target_rotation_delta_deg = rotation_angle_deg(target_T_link7[:3, :3] @ before_T_link7[:3, :3].T)
             object_base = object_position_in_base(response, state, args.approach_object_key)
             approach_metrics = None
+            current_alignment = None
+            raw_alignment = None
+            target_alignment = None
+            raw_alignment_improvement = None
+            target_alignment_improvement = None
             if object_base is not None:
                 before_dist = float(np.linalg.norm(before_T_link7[:3, 3] - object_base))
                 target_dist = float(np.linalg.norm(position_from_pose_dict(target_pose) - object_base))
@@ -572,6 +649,12 @@ def main() -> int:
                     "target_minus_before_m": target_dist - before_dist,
                     "closer": bool(target_dist < before_dist),
                 }
+                T_tcp_in_link7 = np.asarray(state["T_tcp_in_link7"], dtype=np.float64)
+                current_alignment = axis_alignment_to_object(before_T_link7, T_tcp_in_link7, object_base)
+                raw_alignment = axis_alignment_to_object(raw_target_T_link7, T_tcp_in_link7, object_base)
+                target_alignment = axis_alignment_to_object(target_T_link7, T_tcp_in_link7, object_base)
+                raw_alignment_improvement = alignment_improvement(current_alignment, raw_alignment)
+                target_alignment_improvement = alignment_improvement(current_alignment, target_alignment)
 
             print("\n=== HumanEgo proposed step ===")
             print(f"step: {idx}")
@@ -610,6 +693,9 @@ def main() -> int:
                     f"target={approach_metrics['target_link7_to_object_m']:.4f}m, "
                     f"delta={approach_metrics['target_minus_before_m']:+.4f}m"
                 )
+                print(compact_alignment("tcp axes current", current_alignment))
+                print(compact_alignment("tcp axes raw_model", raw_alignment, raw_alignment_improvement))
+                print(compact_alignment("tcp axes target", target_alignment, target_alignment_improvement))
             print(f"{args.side}_pose: {compact_pose(target_pose)}")
 
             operator = prompt_operator()
@@ -626,6 +712,13 @@ def main() -> int:
                 "target_delta_norm_m": target_delta_norm,
                 "target_rotation_delta_deg": target_rotation_delta_deg,
                 "approach_metrics": approach_metrics,
+                "axis_alignment": {
+                    "current": current_alignment,
+                    "raw_model": raw_alignment,
+                    "target": target_alignment,
+                    "raw_model_improvement": raw_alignment_improvement,
+                    "target_improvement": target_alignment_improvement,
+                },
                 "operator_input": operator,
                 "server_response": response,
             }
