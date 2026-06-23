@@ -51,6 +51,10 @@ from policy import ICTPolicy  # noqa: E402
 DEFAULT_CFG = PROJECT_ROOT / "cfg" / "inference" / "g1_serve_bread_right.yaml"
 
 
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
 def utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
@@ -334,7 +338,7 @@ def main() -> int:
         save_rgb=bool(args.save_rgb),
         object_source_override=args.object_source,
     )
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(runtime))
+    server = ReusableThreadingHTTPServer((args.host, args.port), make_handler(runtime))
     print(f"Listening on http://{args.host}:{args.port}/infer", flush=True)
     print(f"Config: {cfg_path}", flush=True)
     print(f"Device: {device}", flush=True)
