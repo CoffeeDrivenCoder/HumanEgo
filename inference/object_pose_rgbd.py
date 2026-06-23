@@ -39,6 +39,8 @@ class RGBDObjectPoseConfig:
     min_points: int = 80
     mask_erode_px: int = 2
     depth_window_px: int = 2
+    fallback_dilate_px: int = 3
+    fallback_depth_window_px: int = 6
 
 
 def _as_config(cfg: dict) -> RGBDObjectPoseConfig:
@@ -56,6 +58,8 @@ def _as_config(cfg: dict) -> RGBDObjectPoseConfig:
         min_points=int(cfg.get("min_points", 80)),
         mask_erode_px=int(cfg.get("mask_erode_px", 2)),
         depth_window_px=int(cfg.get("depth_window_px", 2)),
+        fallback_dilate_px=int(cfg.get("fallback_dilate_px", 3)),
+        fallback_depth_window_px=int(cfg.get("fallback_depth_window_px", 6)),
     )
 
 
@@ -110,15 +114,23 @@ class RGBDObjectPoseEstimator:
             kernel = np.ones((k, k), np.uint8)
             mask_u8 = cv2.erode(mask_u8, kernel, iterations=1)
 
-        valid = (
-            (mask_u8 > 0)
-            & np.isfinite(depth)
-            & (depth >= self.cfg.min_valid_depth_m)
-            & (depth <= self.cfg.max_valid_depth_m)
-        )
-
+        valid = self._valid_depth_mask(depth, mask_u8)
         if self.cfg.depth_window_px > 0:
-            valid = self._fill_valid_from_neighborhood(depth, mask_u8, valid)
+            valid = self._fill_valid_from_neighborhood(depth, mask_u8, valid, self.cfg.depth_window_px)
+
+        if valid.sum() < self.cfg.min_points and self.cfg.mask_erode_px > 0:
+            mask_u8 = (mask > 0).astype(np.uint8)
+            valid = self._valid_depth_mask(depth, mask_u8)
+            if self.cfg.depth_window_px > 0:
+                valid = self._fill_valid_from_neighborhood(depth, mask_u8, valid, self.cfg.depth_window_px)
+
+        if valid.sum() < self.cfg.min_points and self.cfg.fallback_dilate_px > 0:
+            k = 2 * self.cfg.fallback_dilate_px + 1
+            kernel = np.ones((k, k), np.uint8)
+            dilated = cv2.dilate((mask > 0).astype(np.uint8), kernel, iterations=1)
+            valid = self._valid_depth_mask(depth, dilated)
+            if self.cfg.fallback_depth_window_px > 0:
+                valid = self._fill_valid_from_neighborhood(depth, dilated, valid, self.cfg.fallback_depth_window_px)
 
         vs, us = np.where(valid)
         if len(us) < self.cfg.min_points:
@@ -135,12 +147,19 @@ class RGBDObjectPoseEstimator:
         y = (vs.astype(np.float64) - cy) * z / fy
         return np.stack([x, y, z], axis=1)
 
+    def _valid_depth_mask(self, depth: np.ndarray, mask_u8: np.ndarray) -> np.ndarray:
+        return (
+            (mask_u8 > 0)
+            & np.isfinite(depth)
+            & (depth >= self.cfg.min_valid_depth_m)
+            & (depth <= self.cfg.max_valid_depth_m)
+        )
+
     def _fill_valid_from_neighborhood(
-        self, depth: np.ndarray, mask_u8: np.ndarray, valid: np.ndarray
+        self, depth: np.ndarray, mask_u8: np.ndarray, valid: np.ndarray, radius: int
     ) -> np.ndarray:
         if valid.sum() >= self.cfg.min_points:
             return valid
-        radius = self.cfg.depth_window_px
         ys, xs = np.where(mask_u8 > 0)
         filled = valid.copy()
         for y, x in zip(ys, xs):
@@ -189,4 +208,3 @@ class RGBDObjectPosePerception:
 
     def make_clean_image(self, frame, ee_poses_in_cam, grippers) -> np.ndarray:
         return frame.rgb.copy()
-

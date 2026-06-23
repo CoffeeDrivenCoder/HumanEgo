@@ -22,7 +22,7 @@ perception:
   # First robot dry-run uses fixed camera-frame object poses so we can validate
   # policy loading and G1 target conversion before enabling DINO-SAM.
   object_source: "fixed"  # "fixed" for link tests, "rgbd" for real bread/plate poses on server.
-  allow_fixed_object_fallback: true
+  allow_fixed_object_fallback: false
   dry_run_object_source: "fixed"
   dry_run_object_poses_cam:
     obj1:
@@ -42,6 +42,11 @@ perception:
   object_prompts:
     obj1: "a bread ."
     obj2: "a white plate ."
+  min_points: 30
+  mask_erode_px: 0
+  depth_window_px: 4
+  fallback_dilate_px: 4
+  fallback_depth_window_px: 8
   erase_prompt: "a robot arm . a robot gripper ."
   dinosam_cfg_path: "./cfg/preprocess/base/DINOSAM.yaml"
   lama_cfg_path: "./cfg/preprocess/base/Lama.yaml"

@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import traceback
+import urllib.error
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -104,9 +105,17 @@ def post_json(url: str, payload: dict[str, Any], timeout_s: float) -> dict[str, 
             "Connection": "close",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
-        return {"ok": True, "status": resp.status, "num_bytes": len(body), "json": json.loads(body)}
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            return {"ok": True, "status": resp.status, "num_bytes": len(body), "json": json.loads(body)}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            parsed = {"raw_body": body}
+        raise RuntimeError(f"POST {url} failed with HTTP {exc.code}: {json.dumps(parsed, ensure_ascii=False)[:2000]}") from exc
 
 
 def upload_zip(zip_path: Path, upload_url: str, timeout_s: float = 60.0) -> Dict[str, Any]:
