@@ -6,10 +6,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+if [ -f "a2d_sdk/env.sh" ]; then
+  source a2d_sdk/env.sh || echo "[WARN] failed to source a2d_sdk/env.sh; continuing with current environment" >&2
+fi
+
 UPLOAD_URL="${G1_DIAG_UPLOAD_URL:-http://111.0.22.33:30002/upload}"
 TAG="${G1_ROBOTARM_TAG:-robotarm_readonly}"
+UPLOAD_TIMEOUT_S="${G1_DIAG_UPLOAD_TIMEOUT_S:-20}"
 
 python3 scripts/g1_robotarm_readonly_check.py \
   --tag "$TAG" \
+  --upload-timeout-s "$UPLOAD_TIMEOUT_S" \
   --upload-url "$UPLOAD_URL" \
   "$@"

@@ -151,13 +151,19 @@ def T_from_pose_dict(pose: dict[str, float]) -> np.ndarray:
     return T
 
 
-def select_target(step_preview: dict[str, Any], source: str, before_T_link7: np.ndarray) -> dict[str, float]:
+def select_target(
+    step_preview: dict[str, Any],
+    source: str,
+    side: str,
+    before_T_link7: np.ndarray,
+) -> dict[str, float]:
+    prefix = f"{side}_pose_flat"
     if source == "raw":
-        return {k: float(v) for k, v in step_preview["right_pose_flat_raw"].items()}
+        return {k: float(v) for k, v in step_preview[f"{prefix}_raw"].items()}
     if source == "limited":
-        return {k: float(v) for k, v in step_preview["right_pose_flat_limited"].items()}
+        return {k: float(v) for k, v in step_preview[f"{prefix}_limited"].items()}
     if source == "position_keep_orientation":
-        T = T_from_pose_dict({k: float(v) for k, v in step_preview["right_pose_flat_limited"].items()})
+        T = T_from_pose_dict({k: float(v) for k, v in step_preview[f"{prefix}_limited"].items()})
         T[:3, :3] = np.asarray(before_T_link7, dtype=np.float64)[:3, :3]
         return pose_dict_from_T(T)
     raise ValueError(f"unknown target source: {source}")
@@ -177,7 +183,43 @@ def object_position_in_base(response: dict[str, Any], current_state: dict[str, A
     return (T_base_camera @ T_obj_cam)[:3, 3]
 
 
-def call_ee_control(controller: Any, pose: dict[str, float], side: str, lifetime: float) -> dict[str, Any]:
+def adapt_target_pose(
+    target_pose: dict[str, float],
+    before_T_link7: np.ndarray,
+    mode: str,
+    axis_step_m: float,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    adapted = dict(target_pose)
+    current_pose = pose_dict_from_T(before_T_link7)
+    if mode == "full":
+        return adapted, {"mode": mode}
+
+    raw_delta = position_from_pose_dict(target_pose) - before_T_link7[:3, 3]
+    if mode == "position_only":
+        for key in ("qx", "qy", "qz", "qw"):
+            adapted[key] = current_pose[key]
+        return adapted, {"mode": mode, "raw_delta_m": raw_delta.tolist()}
+
+    if mode == "axis_only":
+        axis = int(np.argmax(np.abs(raw_delta)))
+        step = float(np.clip(raw_delta[axis], -abs(axis_step_m), abs(axis_step_m)))
+        target_xyz = before_T_link7[:3, 3].copy()
+        target_xyz[axis] += step
+        adapted.update({"x": float(target_xyz[0]), "y": float(target_xyz[1]), "z": float(target_xyz[2])})
+        for key in ("qx", "qy", "qz", "qw"):
+            adapted[key] = current_pose[key]
+        return adapted, {
+            "mode": mode,
+            "raw_delta_m": raw_delta.tolist(),
+            "selected_axis": ["x", "y", "z"][axis],
+            "axis_step_m": step,
+            "axis_step_limit_m": float(abs(axis_step_m)),
+        }
+
+    raise ValueError(f"unknown target adapter: {mode}")
+
+
+def call_ee_control_once(controller: Any, pose: dict[str, float], side: str, lifetime: float) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "lifetime": float(lifetime),
         "control_group": [f"{side}_arm"],
@@ -207,6 +249,50 @@ def call_ee_control(controller: Any, pose: dict[str, float], side: str, lifetime
         }
 
 
+def call_ee_control(
+    controller: Any,
+    pose: dict[str, float],
+    side: str,
+    lifetime: float,
+    send_hz: float,
+    execute_s: float,
+) -> dict[str, Any]:
+    send_hz = max(0.0, float(send_hz))
+    execute_s = max(0.0, float(execute_s))
+    if send_hz <= 0.0 or execute_s <= 0.0:
+        result = call_ee_control_once(controller, pose, side, lifetime)
+        result["send_mode"] = "single"
+        result["num_sends"] = 1
+        return result
+
+    interval_s = 1.0 / send_hz
+    deadline = time.time() + execute_s
+    attempts = []
+    idx = 0
+    while True:
+        attempt = call_ee_control_once(controller, pose, side, lifetime)
+        attempt["idx"] = idx
+        attempts.append(attempt)
+        idx += 1
+        if not attempt.get("ok"):
+            break
+        remaining = deadline - time.time()
+        if remaining <= 0.0:
+            break
+        time.sleep(min(interval_s, remaining))
+
+    return {
+        "ok": bool(attempts and all(item.get("ok") for item in attempts)),
+        "send_mode": "repeat",
+        "num_sends": len(attempts),
+        "send_hz": send_hz,
+        "execute_s": execute_s,
+        "command_lifetime_s": float(lifetime),
+        "duration_s": sum(float(item.get("duration_s", 0.0)) for item in attempts),
+        "attempts": attempts,
+    }
+
+
 def prompt_operator() -> str:
     try:
         text = input("[Enter]=execute one step, s=skip/replan, q=quit > ")
@@ -225,8 +311,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--target-source", choices=["position_keep_orientation", "limited", "raw"], default="position_keep_orientation")
     parser.add_argument("--approach-object-key", default="obj1")
+    parser.add_argument("--target-adapter", choices=["full", "position_only", "axis_only"], default="full")
+    parser.add_argument("--axis-step-m", type=float, default=0.01)
     parser.add_argument("--confirm-control", default="")
     parser.add_argument("--lifetime", type=float, default=0.5)
+    parser.add_argument("--send-hz", type=float, default=10.0)
+    parser.add_argument("--execute-s", type=float, default=1.0)
     parser.add_argument("--settle-s", type=float, default=1.0)
     parser.add_argument("--jpeg-quality", type=int, default=75)
     parser.add_argument("--send-width", type=int, default=320)
@@ -235,7 +325,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--depth-encoding", choices=["z16", "float16", "float32"], default="z16")
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--upload-url", default="")
-    parser.add_argument("--upload-timeout-s", type=float, default=60.0)
+    parser.add_argument("--upload-timeout-s", type=float, default=20.0)
     return parser
 
 
@@ -300,8 +390,17 @@ def main() -> int:
                 encoding="utf-8",
             )
 
-            step_preview = response["policy_preview"]["sides"][args.side][0]
-            target_pose = select_target(step_preview, args.target_source, before_T_link7)
+            side_previews = response.get("policy_preview", {}).get("sides", {}).get(args.side) or []
+            if not side_previews:
+                raise RuntimeError(f"server response missing policy_preview.sides.{args.side}[0]")
+            step_preview = side_previews[0]
+            raw_target_pose = select_target(step_preview, args.target_source, args.side, before_T_link7)
+            target_pose, adapter_info = adapt_target_pose(
+                raw_target_pose,
+                before_T_link7,
+                args.target_adapter,
+                args.axis_step_m,
+            )
             target_delta = position_from_pose_dict(target_pose) - before_T_link7[:3, 3]
             target_delta_norm = float(np.linalg.norm(target_delta))
             object_base = object_position_in_base(response, state, args.approach_object_key)
@@ -321,7 +420,12 @@ def main() -> int:
             print("\n=== HumanEgo proposed step ===")
             print(f"step: {idx}")
             print(f"done_prob: {response['policy_preview']['done_prob']:.3f}")
+            print(f"object_source: {response.get('input_summary', {}).get('object_source_used')}")
+            object_error = response.get("input_summary", {}).get("object_error")
+            if object_error:
+                print(f"object_error: {object_error.get('error_type')}: {object_error.get('error')}")
             print(f"target_source: {args.target_source}")
+            print(f"target_adapter: {args.target_adapter}")
             print(f"target_delta_m: {target_delta.tolist()}  norm={target_delta_norm:.4f}")
             print(f"server raw_delta_norm_m: {step_preview['safety_translation_limit']['raw_delta_norm_m']:.4f}")
             print(f"server clipped: {step_preview['safety_translation_limit']['clipped']}")
@@ -333,7 +437,7 @@ def main() -> int:
                     f"target={approach_metrics['target_link7_to_object_m']:.4f}m, "
                     f"delta={approach_metrics['target_minus_before_m']:+.4f}m"
                 )
-            print(f"right_pose: {compact_pose(target_pose)}")
+            print(f"{args.side}_pose: {compact_pose(target_pose)}")
 
             operator = prompt_operator()
             step_record: Dict[str, Any] = {
@@ -341,7 +445,10 @@ def main() -> int:
                 "request_id": request_id,
                 "server_ok": bool(response.get("ok")),
                 "target_source": args.target_source,
+                "target_adapter": args.target_adapter,
+                "raw_target_pose": raw_target_pose,
                 "target_pose": target_pose,
+                "target_adapter_info": adapter_info,
                 "target_delta_m": target_delta.tolist(),
                 "target_delta_norm_m": target_delta_norm,
                 "approach_metrics": approach_metrics,
@@ -367,15 +474,33 @@ def main() -> int:
                 break
 
             log(f"step {idx}: executing one EE target")
-            control_result = call_ee_control(arm.controller, target_pose, args.side, args.lifetime)
+            control_result = call_ee_control(
+                arm.controller,
+                target_pose,
+                args.side,
+                args.lifetime,
+                args.send_hz,
+                args.execute_s,
+            )
             report["control_sent"] = True
             step_record["executed"] = bool(control_result.get("ok"))
             step_record["control_result"] = control_result
 
+            immediate_T_link7 = arm.get_T_link7_in_base()
+            immediate_delta = immediate_T_link7[:3, 3] - before_T_link7[:3, 3]
+            step_record["immediate_T_link7_in_base"] = immediate_T_link7.tolist()
+            step_record["immediate_delta_m"] = immediate_delta.tolist()
+            step_record["immediate_delta_norm_m"] = float(np.linalg.norm(immediate_delta))
+            log(
+                f"step {idx}: immediate_delta={immediate_delta.tolist()} "
+                f"norm={np.linalg.norm(immediate_delta):.4f}"
+            )
             time.sleep(float(args.settle_s))
             after_T_link7 = arm.get_T_link7_in_base()
             observed_delta = after_T_link7[:3, 3] - before_T_link7[:3, 3]
             step_record["after_T_link7_in_base"] = after_T_link7.tolist()
+            step_record["settled_delta_m"] = observed_delta.tolist()
+            step_record["settled_delta_norm_m"] = float(np.linalg.norm(observed_delta))
             step_record["observed_delta_m"] = observed_delta.tolist()
             step_record["observed_delta_norm_m"] = float(np.linalg.norm(observed_delta))
             if object_base is not None:
@@ -388,7 +513,7 @@ def main() -> int:
                     "closer": bool(approach_metrics and after_dist < approach_metrics["before_link7_to_object_m"]),
                 }
             log(
-                f"step {idx}: observed_delta={observed_delta.tolist()} "
+                f"step {idx}: settled_delta={observed_delta.tolist()} "
                 f"norm={np.linalg.norm(observed_delta):.4f}"
             )
             if object_base is not None:
@@ -443,4 +568,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)

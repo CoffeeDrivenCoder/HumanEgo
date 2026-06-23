@@ -65,7 +65,7 @@ def make_zip(src_dir: Path) -> Path:
     return zip_path
 
 
-def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
+def upload_zip(zip_path: Path, upload_url: str, timeout_s: float = 20.0) -> Dict[str, Any]:
     data = zip_path.read_bytes()
     req = urllib.request.Request(
         upload_url,
@@ -75,9 +75,10 @@ def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
             "Content-Type": "application/zip",
             "Content-Length": str(len(data)),
             "X-G1-Diagnostics-Filename": zip_path.name,
+            "Connection": "close",
         },
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         return {
             "ok": True,
             "status": resp.status,
@@ -344,6 +345,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--status-tries", type=int, default=30)
     parser.add_argument("--status-sleep-s", type=float, default=0.1)
     parser.add_argument("--upload-url", default="")
+    parser.add_argument("--upload-timeout-s", type=float, default=20.0)
     return parser
 
 
@@ -355,6 +357,7 @@ def main() -> int:
         "args": vars(args),
         "note": "Observe mode is read-only. Hold/move modes require --confirm-control RUN_CONTROL.",
     }
+    controller = None
 
     try:
         from a2d_sdk.robot import RobotController
@@ -452,6 +455,26 @@ def main() -> int:
 
     except Exception as exc:
         report.update({"ok": False, "error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc()})
+    finally:
+        cleanup: Dict[str, Any] = {}
+        if controller is not None:
+            for method_name in ("shutdown", "close"):
+                if not hasattr(controller, method_name):
+                    continue
+                try:
+                    getattr(controller, method_name)()
+                    cleanup["controller"] = {"ok": True, "method": method_name}
+                    break
+                except Exception as exc:
+                    cleanup["controller"] = {
+                        "ok": False,
+                        "method": method_name,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                    break
+        if cleanup:
+            report["cleanup"] = cleanup
 
     (run_dir / "ee_control_frame_report.json").write_text(
         json.dumps(json_safe(report), ensure_ascii=False, indent=2),
@@ -461,7 +484,7 @@ def main() -> int:
     upload = None
     if args.upload_url:
         try:
-            upload = upload_zip(zip_path, args.upload_url)
+            upload = upload_zip(zip_path, args.upload_url, args.upload_timeout_s)
         except Exception as exc:
             upload = {"ok": False, "error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc()}
         (run_dir / "upload_result.json").write_text(json.dumps(upload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -472,4 +495,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)

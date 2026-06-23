@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import math
+import time
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -80,7 +81,14 @@ def coerce_state_list(value: Any) -> list[float]:
         value = value[0]
     if isinstance(value, str):
         value = ast.literal_eval(value)
-    return [float(v) for v in value]
+    if value is None:
+        raise ValueError("state is None")
+    values = list(value)
+    if not values:
+        raise ValueError("state is empty")
+    if any(v is None for v in values):
+        raise ValueError(f"state contains None values: {values!r}")
+    return [float(v) for v in values]
 
 
 def normalize_angle_maybe_degrees(value: float) -> float:
@@ -147,8 +155,6 @@ def compute_corobot_head_pitch_in_base(head_states: Any, waist_states: Any, urdf
 
 
 def wait_motion_status(controller: Any, tries: int = 30, sleep_s: float = 0.1):
-    import time
-
     last_status = None
     for _ in range(tries):
         status = controller.get_motion_status()
@@ -157,6 +163,22 @@ def wait_motion_status(controller: Any, tries: int = 30, sleep_s: float = 0.1):
             return status
         time.sleep(sleep_s)
     return last_status
+
+
+def wait_state(getter: Any, name: str, min_len: int, tries: int = 50, sleep_s: float = 0.1) -> list[float]:
+    last_value = None
+    last_error = None
+    for _ in range(max(1, tries)):
+        try:
+            last_value = getter()
+            values = coerce_state_list(last_value)
+            if len(values) >= min_len:
+                return values
+            last_error = f"expected at least {min_len} values, got {len(values)}"
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(sleep_s)
+    raise RuntimeError(f"{name} not ready after {tries} tries, last={last_value!r}, last_error={last_error}")
 
 
 class G1RobotArmReadOnly:
@@ -169,6 +191,8 @@ class G1RobotArmReadOnly:
         urdf_path: str | None = None,
         motion_tries: int = 30,
         motion_sleep_s: float = 0.1,
+        state_tries: int = 50,
+        state_sleep_s: float = 0.1,
     ):
         side = side.lower()
         if side not in {"left", "right"}:
@@ -178,6 +202,8 @@ class G1RobotArmReadOnly:
         self.urdf_path = urdf_path
         self.motion_tries = int(motion_tries)
         self.motion_sleep_s = float(motion_sleep_s)
+        self.state_tries = int(state_tries)
+        self.state_sleep_s = float(state_sleep_s)
 
         from a2d_sdk.robot import RobotController, RobotDds
 
@@ -201,8 +227,20 @@ class G1RobotArmReadOnly:
         self._last_fk: Optional[Dict[str, Any]] = None
 
     def get_T_base_camera(self) -> np.ndarray:
-        head_states = self.robot.head_joint_states()
-        waist_states = self.robot.waist_joint_states()
+        head_states = wait_state(
+            self.robot.head_joint_states,
+            "head_joint_states",
+            min_len=2,
+            tries=self.state_tries,
+            sleep_s=self.state_sleep_s,
+        )
+        waist_states = wait_state(
+            self.robot.waist_joint_states,
+            "waist_joint_states",
+            min_len=2,
+            tries=self.state_tries,
+            sleep_s=self.state_sleep_s,
+        )
         fk = compute_corobot_head_pitch_in_base(head_states, waist_states, self.urdf_path)
         self._last_fk = fk
         return fk["T_head_pitch_in_base"] @ self.T_head_pitch_camera
@@ -254,10 +292,14 @@ class G1RobotArmReadOnly:
         }
 
     def get_gripper_state(self) -> dict[str, Any]:
-        value = self.robot.gripper_states()
         timestamp = None
-        if isinstance(value, tuple) and len(value) == 2:
-            value, timestamp = value
+        value = wait_state(
+            self.robot.gripper_states,
+            "gripper_states",
+            min_len=1,
+            tries=self.state_tries,
+            sleep_s=self.state_sleep_s,
+        )
         vals = coerce_state_list(value)
         idx = 0 if self.side == "left" else min(1, len(vals) - 1)
         raw = float(vals[idx])
@@ -292,4 +334,10 @@ class G1RobotArmReadOnly:
         raise RuntimeError("G1RobotArmReadOnly refuses to home. Use a control-enabled adapter after validation.")
 
     def close(self) -> None:
-        pass
+        if hasattr(self, "robot") and hasattr(self.robot, "shutdown"):
+            self.robot.shutdown()
+        if hasattr(self, "controller"):
+            for method_name in ("shutdown", "close"):
+                if hasattr(self.controller, method_name):
+                    getattr(self.controller, method_name)()
+                    break

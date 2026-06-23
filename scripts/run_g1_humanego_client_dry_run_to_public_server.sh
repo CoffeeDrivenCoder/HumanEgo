@@ -7,6 +7,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+if [ -f "a2d_sdk/env.sh" ]; then
+  source a2d_sdk/env.sh || echo "[WARN] failed to source a2d_sdk/env.sh; continuing with current environment" >&2
+fi
+
 SERVER_URL="${G1_HUMANEGO_SERVER_URL:-http://111.0.22.33:30003/infer}"
 UPLOAD_URL="${G1_DIAG_UPLOAD_URL:-http://111.0.22.33:30002/upload}"
 TAG="${G1_HUMANEGO_TAG:-client_dry_run}"
@@ -17,11 +21,12 @@ JPEG_QUALITY="${G1_HUMANEGO_JPEG_QUALITY:-75}"
 SEND_WIDTH="${G1_HUMANEGO_SEND_WIDTH:-320}"
 SEND_HEIGHT="${G1_HUMANEGO_SEND_HEIGHT:-240}"
 TIMEOUT_S="${G1_HUMANEGO_TIMEOUT_S:-120}"
-UPLOAD_TIMEOUT_S="${G1_HUMANEGO_UPLOAD_TIMEOUT_S:-60}"
+UPLOAD_TIMEOUT_S="${G1_HUMANEGO_UPLOAD_TIMEOUT_S:-20}"
 SAVE_DEPTH="${G1_HUMANEGO_SAVE_DEPTH:-false}"
-SEND_DEPTH="${G1_HUMANEGO_SEND_DEPTH:-false}"
+SEND_DEPTH="${G1_HUMANEGO_SEND_DEPTH:-true}"
 DEPTH_ENCODING="${G1_HUMANEGO_DEPTH_ENCODING:-z16}"
 CLOSE_CAMERA="${G1_HUMANEGO_CLOSE_CAMERA:-false}"
+CLOSE_ARM="${G1_HUMANEGO_CLOSE_ARM:-false}"
 
 SAVE_DEPTH_ARG="--no-save-depth"
 if [[ "$SAVE_DEPTH" == "true" || "$SAVE_DEPTH" == "1" ]]; then
@@ -36,6 +41,11 @@ fi
 SEND_DEPTH_ARG="--no-send-depth"
 if [[ "$SEND_DEPTH" == "true" || "$SEND_DEPTH" == "1" ]]; then
   SEND_DEPTH_ARG="--send-depth"
+fi
+
+CLOSE_ARM_ARG="--no-close-arm"
+if [[ "$CLOSE_ARM" == "true" || "$CLOSE_ARM" == "1" ]]; then
+  CLOSE_ARM_ARG="--close-arm"
 fi
 
 python3 scripts/g1_humanego_client_dry_run.py \
@@ -53,5 +63,6 @@ python3 scripts/g1_humanego_client_dry_run.py \
   "$SEND_DEPTH_ARG" \
   --depth-encoding "$DEPTH_ENCODING" \
   "$CLOSE_CAMERA_ARG" \
+  "$CLOSE_ARM_ARG" \
   --upload-url "$UPLOAD_URL" \
   "$@"

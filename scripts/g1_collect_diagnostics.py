@@ -937,7 +937,7 @@ def make_zip(src_dir: Path) -> Path:
     return zip_path
 
 
-def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
+def upload_zip(zip_path: Path, upload_url: str, timeout_s: float = 20.0) -> Dict[str, Any]:
     data = zip_path.read_bytes()
     req = urllib.request.Request(
         upload_url,
@@ -947,10 +947,11 @@ def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
             "Content-Type": "application/zip",
             "Content-Length": str(len(data)),
             "X-G1-Diagnostics-Filename": zip_path.name,
+            "Connection": "close",
         },
     )
     started = time.time()
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         body = resp.read().decode("utf-8", errors="replace")
         return {
             "ok": True,
@@ -993,6 +994,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pose-method", default="pca1", choices=["pca1", "pca2"])
 
     parser.add_argument("--upload-url", default="", help="Example: http://192.168.1.10:8765/upload")
+    parser.add_argument("--upload-timeout-s", type=float, default=20.0)
 
     parser.add_argument("--enable-control", action="store_true")
     parser.add_argument("--confirm-control", default="")
@@ -1048,7 +1050,7 @@ def main() -> int:
     upload_result = None
     if args.upload_url:
         try:
-            upload_result = upload_zip(zip_path, args.upload_url)
+            upload_result = upload_zip(zip_path, args.upload_url, args.upload_timeout_s)
         except Exception as exc:
             upload_result = {
                 "ok": False,
@@ -1066,4 +1068,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)

@@ -10,6 +10,7 @@ between "all interfaces verified" and "send policy targets to the robot".
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -87,7 +88,7 @@ def make_zip(src_dir: Path) -> Path:
     return zip_path
 
 
-def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
+def upload_zip(zip_path: Path, upload_url: str, timeout_s: float = 20.0) -> Dict[str, Any]:
     data = zip_path.read_bytes()
     req = urllib.request.Request(
         upload_url,
@@ -97,9 +98,10 @@ def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
             "Content-Type": "application/zip",
             "Content-Length": str(len(data)),
             "X-G1-Diagnostics-Filename": zip_path.name,
+            "Connection": "close",
         },
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         return {
             "ok": True,
             "status": resp.status,
@@ -116,6 +118,70 @@ def choose_device(requested: str) -> str:
         return "cuda" if torch.cuda.is_available() else "cpu"
     except Exception:
         return "cpu"
+
+
+def check_dry_run_prerequisites(cfg: dict[str, Any], requested_device: str) -> dict[str, Any]:
+    """Fail early with actionable setup information before touching robot APIs."""
+    missing: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    if importlib.util.find_spec("torch") is None:
+        missing.append(
+            {
+                "type": "python_module",
+                "name": "torch",
+                "message": "HumanEgo policy inference requires PyTorch, but the active Python cannot import torch.",
+            }
+        )
+    else:
+        try:
+            import torch
+
+            if requested_device == "cuda" and not torch.cuda.is_available():
+                missing.append(
+                    {
+                        "type": "device",
+                        "name": "cuda",
+                        "message": "--device cuda was requested, but torch.cuda.is_available() is false.",
+                    }
+                )
+            elif requested_device == "auto" and not torch.cuda.is_available():
+                warnings.append("CUDA is not available in this Python; dry-run will use CPU if dependencies are otherwise present.")
+        except Exception as exc:
+            missing.append(
+                {
+                    "type": "python_module",
+                    "name": "torch",
+                    "message": f"torch is installed but failed to import: {type(exc).__name__}: {exc}",
+                }
+            )
+
+    ckpt_path = resolve_project_path(cfg["policy"]["ckpt"])
+    ckpt_dir = ckpt_path.parent
+    required_files = {
+        "checkpoint": ckpt_path,
+        "config": ckpt_dir / "config.json",
+        "dataset_stats": ckpt_dir / "dataset_stats.json",
+    }
+    for label, path in required_files.items():
+        if not path.exists():
+            missing.append(
+                {
+                    "type": "file",
+                    "name": label,
+                    "path": str(path),
+                    "message": f"Required HumanEgo policy {label} file does not exist.",
+                }
+            )
+
+    return {
+        "ok": not missing,
+        "missing": missing,
+        "warnings": warnings,
+        "policy_ckpt": str(ckpt_path),
+        "policy_dir": str(ckpt_dir),
+        "python": sys.executable,
+    }
 
 
 def quat_xyzw_to_R(q: Any) -> np.ndarray:
@@ -307,6 +373,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preview-steps", type=int, default=3)
     parser.add_argument("--save-images", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--upload-url", default="")
+    parser.add_argument("--upload-timeout-s", type=float, default=20.0)
     return parser
 
 
@@ -328,6 +395,13 @@ def main() -> int:
     cam = None
     arm = None
     try:
+        preflight = check_dry_run_prerequisites(cfg, args.device)
+        report["preflight"] = preflight
+        if not preflight["ok"]:
+            raise RuntimeError(
+                "Dry-run prerequisites are missing. See report['preflight']['missing'] for exact setup gaps."
+            )
+
         from G1Camera import G1HeadRGBDCamera
         from G1RobotArm import G1RobotArmReadOnly
         from policy import ICTPolicy
@@ -477,7 +551,7 @@ def main() -> int:
     upload = None
     if args.upload_url:
         try:
-            upload = upload_zip(zip_path, args.upload_url)
+            upload = upload_zip(zip_path, args.upload_url, args.upload_timeout_s)
         except Exception as exc:
             upload = {
                 "ok": False,
@@ -493,4 +567,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)

@@ -118,7 +118,14 @@ def coerce_state_list(value: Any):
         value = value[0]
     if isinstance(value, str):
         value = ast.literal_eval(value)
-    return [float(v) for v in value]
+    if value is None:
+        raise ValueError("state is None")
+    values = list(value)
+    if not values:
+        raise ValueError("state is empty")
+    if any(v is None for v in values):
+        raise ValueError(f"state contains None values: {values!r}")
+    return [float(v) for v in values]
 
 
 def compute_g1_head_fk(head_states, waist_states) -> Dict[str, Any]:
@@ -265,6 +272,22 @@ def wait_motion_status(controller: Any, tries: int = 30, sleep_s: float = 0.1):
     return last_status, attempts
 
 
+def wait_state(getter: Any, name: str, min_len: int, tries: int = 50, sleep_s: float = 0.1):
+    last_value = None
+    last_error = None
+    for _ in range(max(1, tries)):
+        try:
+            last_value = getter()
+            values = coerce_state_list(last_value)
+            if len(values) >= min_len:
+                return values
+            last_error = f"expected at least {min_len} values, got {len(values)}"
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(sleep_s)
+    raise RuntimeError(f"{name} not ready after {tries} tries, last={last_value!r}, last_error={last_error}")
+
+
 def draw_cross(img, uv, color, label):
     u, v, z = uv
     if not np.isfinite(u) or not np.isfinite(v):
@@ -276,7 +299,7 @@ def draw_cross(img, uv, color, label):
         cv2.putText(img, f"{label} z={z:.2f}", (max(0, min(w - 1, x + 8)), max(20, min(h - 1, y - 8))), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
 
-def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
+def upload_zip(zip_path: Path, upload_url: str, timeout_s: float = 20.0) -> Dict[str, Any]:
     data = zip_path.read_bytes()
     req = urllib.request.Request(
         upload_url,
@@ -286,9 +309,10 @@ def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
             "Content-Type": "application/zip",
             "Content-Length": str(len(data)),
             "X-G1-Diagnostics-Filename": zip_path.name,
+            "Connection": "close",
         },
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         return {"ok": True, "status": resp.status, "response": resp.read().decode("utf-8", errors="replace")}
 
 
@@ -311,6 +335,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parameter-py", default=str(DEFAULT_PARAMETER_PY))
     parser.add_argument("--side", choices=["left", "right", "both"], default="both")
     parser.add_argument("--upload-url", default="")
+    parser.add_argument("--upload-timeout-s", type=float, default=20.0)
     parser.add_argument("--rgb-name", default="head")
     parser.add_argument("--depth-name", default="head_depth")
     parser.add_argument("--warmup-s", type=float, default=2.0)
@@ -366,8 +391,8 @@ def main() -> int:
         np.save(run_dir / "T_param.npy", T_param)
 
         robot = RobotDds()
-        head_states = robot.head_joint_states()
-        waist_states = robot.waist_joint_states()
+        head_states = wait_state(robot.head_joint_states, "head_joint_states", min_len=2)
+        waist_states = wait_state(robot.waist_joint_states, "waist_joint_states", min_len=2)
         head_fk = compute_g1_head_fk(head_states, waist_states)
         try:
             corobot_head_fk = compute_corobot_head_fk(head_states, waist_states, args.urdf_path or None)
@@ -523,7 +548,7 @@ def main() -> int:
     upload = None
     if args.upload_url:
         try:
-            upload = upload_zip(zip_path, args.upload_url)
+            upload = upload_zip(zip_path, args.upload_url, args.upload_timeout_s)
         except Exception as exc:
             upload = {"ok": False, "error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc()}
         (run_dir / "upload_result.json").write_text(json.dumps(upload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -534,4 +559,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)

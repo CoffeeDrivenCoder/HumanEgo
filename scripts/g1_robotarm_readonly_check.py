@@ -67,7 +67,7 @@ def make_zip(src_dir: Path) -> Path:
     return zip_path
 
 
-def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
+def upload_zip(zip_path: Path, upload_url: str, timeout_s: float = 20.0) -> Dict[str, Any]:
     data = zip_path.read_bytes()
     req = urllib.request.Request(
         upload_url,
@@ -77,9 +77,10 @@ def upload_zip(zip_path: Path, upload_url: str) -> Dict[str, Any]:
             "Content-Type": "application/zip",
             "Content-Length": str(len(data)),
             "X-G1-Diagnostics-Filename": zip_path.name,
+            "Connection": "close",
         },
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         return {"ok": True, "status": resp.status, "response": resp.read().decode("utf-8", errors="replace")}
 
 
@@ -90,6 +91,7 @@ def main() -> int:
     parser.add_argument("--tag", default="robotarm_readonly")
     parser.add_argument("--side", default="right", choices=["right", "left"])
     parser.add_argument("--upload-url", default="")
+    parser.add_argument("--upload-timeout-s", type=float, default=20.0)
     parser.add_argument("--sample-offset-cam", nargs=3, type=float, default=[0.0, 0.0, 0.0])
     parser.add_argument("--urdf-path", default="")
     args = parser.parse_args()
@@ -165,7 +167,7 @@ def main() -> int:
     upload = None
     if args.upload_url:
         try:
-            upload = upload_zip(zip_path, args.upload_url)
+            upload = upload_zip(zip_path, args.upload_url, args.upload_timeout_s)
         except Exception as exc:
             upload = {"ok": False, "error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc()}
         (run_dir / "upload_result.json").write_text(json.dumps(upload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -176,4 +178,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)

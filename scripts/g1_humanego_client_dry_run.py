@@ -217,11 +217,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--send-height", type=int, default=0)
     parser.add_argument("--preview-steps", type=int, default=3)
     parser.add_argument("--timeout-s", type=float, default=120.0)
-    parser.add_argument("--upload-timeout-s", type=float, default=60.0)
+    parser.add_argument("--upload-timeout-s", type=float, default=20.0)
     parser.add_argument("--send-depth", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--depth-encoding", choices=["z16", "float16", "float32"], default="z16")
     parser.add_argument("--save-depth", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--close-camera", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--close-arm", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--upload-url", default="")
     return parser
 
@@ -375,13 +376,15 @@ def main() -> int:
         elif cam is not None:
             report["camera_close_skipped"] = True
             log("skipping G1 camera close for dry-run to avoid SDK shutdown blocking")
-        if arm is not None:
+        if arm is not None and args.close_arm:
             try:
                 log("closing read-only arm adapter")
                 arm.close()
                 log("read-only arm adapter closed")
             except Exception as exc:
                 report["arm_close_error"] = f"{type(exc).__name__}: {exc}"
+        elif arm is not None:
+            log("skipping read-only arm adapter close for dry-run; os._exit will clean SDK threads")
 
     (run_dir / "client_dry_run_report.json").write_text(
         json.dumps(json_safe(report), ensure_ascii=False, indent=2),
@@ -406,4 +409,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
