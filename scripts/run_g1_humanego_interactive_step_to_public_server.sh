@@ -21,6 +21,7 @@ TAG="${G1_HUMANEGO_TAG:-interactive_step}"
 CFG="${G1_HUMANEGO_CFG:-cfg/inference/g1_serve_bread_right.yaml}"
 CONFIRM="${G1_HUMANEGO_CONFIRM:-}"
 MAX_STEPS="${G1_HUMANEGO_MAX_STEPS:-20}"
+CONTROL_MODE="${G1_HUMANEGO_CONTROL_MODE:-prompt}"
 TARGET_SOURCE="${G1_HUMANEGO_TARGET_SOURCE:-position_keep_orientation}"
 TARGET_ADAPTER="${G1_HUMANEGO_TARGET_ADAPTER:-full}"
 OBJECT_LOCK="${G1_HUMANEGO_OBJECT_LOCK:-none}"
@@ -77,6 +78,7 @@ python3 scripts/g1_humanego_interactive_step_client.py \
   --tag "$TAG" \
   --confirm-control "$CONFIRM" \
   --max-steps "$MAX_STEPS" \
+  --control-mode "$CONTROL_MODE" \
   --target-source "$TARGET_SOURCE" \
   --approach-object-key "$APPROACH_OBJECT_KEY" \
   --object-lock "$OBJECT_LOCK" \

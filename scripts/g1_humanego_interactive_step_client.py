@@ -773,6 +773,12 @@ def prompt_operator() -> str:
     return text.strip().lower()
 
 
+def choose_operator(control_mode: str) -> str:
+    if control_mode == "auto":
+        return "auto"
+    return prompt_operator()
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cfg", default=str(DEFAULT_CFG))
@@ -781,6 +787,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tag", default="interactive_step")
     parser.add_argument("--side", choices=["right", "left"], default="right")
     parser.add_argument("--max-steps", type=int, default=20)
+    parser.add_argument("--control-mode", choices=["prompt", "auto"], default="prompt")
     parser.add_argument("--target-source", choices=["position_keep_orientation", "limited", "raw"], default="position_keep_orientation")
     parser.add_argument("--approach-object-key", default="obj1")
     parser.add_argument("--object-lock", choices=["none", "base_after_first"], default="none")
@@ -1023,7 +1030,9 @@ def main() -> int:
                 print(compact_alignment("tcp axes target", target_alignment, target_alignment_improvement))
             print(f"{args.side}_pose: {compact_pose(target_pose)}")
 
-            operator = prompt_operator()
+            operator = choose_operator(args.control_mode)
+            if operator == "auto":
+                log(f"step {idx}: auto control mode executing without prompt")
             step_record: Dict[str, Any] = {
                 "idx": idx,
                 "request_id": request_id,
