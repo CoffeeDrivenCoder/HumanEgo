@@ -484,6 +484,7 @@ def adapt_target_pose(
     before_T_link7: np.ndarray,
     mode: str,
     axis_step_m: float,
+    target_z_bias_m: float,
     max_orientation_deg: float,
     probe_axis: str,
     probe_deg: float,
@@ -491,18 +492,27 @@ def adapt_target_pose(
 ) -> tuple[dict[str, float], dict[str, Any]]:
     adapted = dict(target_pose)
     current_pose = pose_dict_from_T(before_T_link7)
+    target_z_bias_m = float(target_z_bias_m)
+    if abs(target_z_bias_m) > EPS:
+        adapted["z"] = float(adapted["z"] + target_z_bias_m)
     if mode == "full":
-        return adapted, {"mode": mode}
+        return adapted, {"mode": mode, "target_z_bias_m": target_z_bias_m}
 
     raw_delta = position_from_pose_dict(target_pose) - before_T_link7[:3, 3]
+    biased_delta = position_from_pose_dict(adapted) - before_T_link7[:3, 3]
     if mode == "position_only":
         for key in ("qx", "qy", "qz", "qw"):
             adapted[key] = current_pose[key]
-        return adapted, {"mode": mode, "raw_delta_m": raw_delta.tolist()}
+        return adapted, {
+            "mode": mode,
+            "raw_delta_m": raw_delta.tolist(),
+            "biased_delta_m": biased_delta.tolist(),
+            "target_z_bias_m": target_z_bias_m,
+        }
 
     if mode == "axis_only":
-        axis = int(np.argmax(np.abs(raw_delta)))
-        step = float(np.clip(raw_delta[axis], -abs(axis_step_m), abs(axis_step_m)))
+        axis = int(np.argmax(np.abs(biased_delta)))
+        step = float(np.clip(biased_delta[axis], -abs(axis_step_m), abs(axis_step_m)))
         target_xyz = before_T_link7[:3, 3].copy()
         target_xyz[axis] += step
         adapted.update({"x": float(target_xyz[0]), "y": float(target_xyz[1]), "z": float(target_xyz[2])})
@@ -511,6 +521,8 @@ def adapt_target_pose(
         return adapted, {
             "mode": mode,
             "raw_delta_m": raw_delta.tolist(),
+            "biased_delta_m": biased_delta.tolist(),
+            "target_z_bias_m": target_z_bias_m,
             "selected_axis": ["x", "y", "z"][axis],
             "axis_step_m": step,
             "axis_step_limit_m": float(abs(axis_step_m)),
@@ -531,6 +543,8 @@ def adapt_target_pose(
         return adapted, {
             "mode": mode,
             "raw_delta_m": raw_delta.tolist(),
+            "biased_delta_m": biased_delta.tolist(),
+            "target_z_bias_m": target_z_bias_m,
             "orientation_limit": rotation_info,
         }
 
@@ -548,6 +562,8 @@ def adapt_target_pose(
         return adapted, {
             "mode": mode,
             "raw_delta_m": raw_delta.tolist(),
+            "biased_delta_m": biased_delta.tolist(),
+            "target_z_bias_m": target_z_bias_m,
             "probe_axis": probe_axis,
             "probe_deg": float(probe_deg),
             "probe_frame": probe_frame,
@@ -782,6 +798,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="full",
     )
     parser.add_argument("--axis-step-m", type=float, default=0.01)
+    parser.add_argument("--target-z-bias-m", type=float, default=0.0)
     parser.add_argument("--max-orientation-deg", type=float, default=10.0)
     parser.add_argument("--probe-axis", choices=["x", "y", "z"], default="z")
     parser.add_argument("--probe-deg", type=float, default=10.0)
@@ -907,6 +924,7 @@ def main() -> int:
                 before_T_link7,
                 args.target_adapter,
                 args.axis_step_m,
+                args.target_z_bias_m,
                 args.max_orientation_deg,
                 args.probe_axis,
                 args.probe_deg,
@@ -959,6 +977,8 @@ def main() -> int:
                 print(f"object_error: {object_error.get('error_type')}: {object_error.get('error')}")
             print(f"target_source: {args.target_source}")
             print(f"target_adapter: {args.target_adapter}")
+            if abs(float(args.target_z_bias_m)) > EPS:
+                print(f"target_z_bias_m: {args.target_z_bias_m:+.4f}")
             print(f"target_delta_m: {target_delta.tolist()}  norm={target_delta_norm:.4f}")
             print(f"target_rotation_delta_deg: {target_rotation_delta_deg:.2f}")
             if "orientation_limit" in adapter_info:

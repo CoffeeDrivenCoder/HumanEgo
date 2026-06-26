@@ -26,6 +26,7 @@ TARGET_ADAPTER="${G1_HUMANEGO_TARGET_ADAPTER:-full}"
 OBJECT_LOCK="${G1_HUMANEGO_OBJECT_LOCK:-none}"
 OBJECT_LOCK_REQUIRE_CLEAN="${G1_HUMANEGO_OBJECT_LOCK_REQUIRE_CLEAN:-true}"
 AXIS_STEP_M="${G1_HUMANEGO_AXIS_STEP_M:-0.01}"
+TARGET_Z_BIAS_M="${G1_HUMANEGO_TARGET_Z_BIAS_M:-0.0}"
 MAX_ORIENTATION_DEG="${G1_HUMANEGO_MAX_ORIENTATION_DEG:-10}"
 PROBE_AXIS="${G1_HUMANEGO_PROBE_AXIS:-z}"
 PROBE_DEG="${G1_HUMANEGO_PROBE_DEG:-10}"
@@ -82,6 +83,7 @@ python3 scripts/g1_humanego_interactive_step_client.py \
   "$OBJECT_LOCK_CLEAN_ARG" \
   --target-adapter "$TARGET_ADAPTER" \
   --axis-step-m "$AXIS_STEP_M" \
+  --target-z-bias-m "$TARGET_Z_BIAS_M" \
   --max-orientation-deg "$MAX_ORIENTATION_DEG" \
   --probe-axis "$PROBE_AXIS" \
   --probe-deg "$PROBE_DEG" \
