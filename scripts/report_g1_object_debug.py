@@ -41,8 +41,28 @@ def main() -> int:
 
     response = load_json(run_dir / "response.json")
     object_debug = ((response.get("input_summary") or {}).get("object_debug") or {})
+    vision_summary = response.get("vision_summary") or {}
     print(f"run: {run_dir}")
     print(f"object_source_used: {(response.get('input_summary') or {}).get('object_source_used')}")
+    if vision_summary:
+        files = vision_summary.get("files") or {}
+        if files:
+            print("vision files:")
+            if files.get("contact_sheet"):
+                print(f"  contact_sheet: {files['contact_sheet']}")
+            if files.get("depth_colormap"):
+                print(f"  depth_colormap: {files['depth_colormap']}")
+            for label, path in (files.get("projection") or {}).items():
+                print(f"  projection_{label}: {path}")
+        warnings = {
+            key: item.get("warnings") or []
+            for key, item in (vision_summary.get("objects") or {}).items()
+            if item.get("warnings")
+        }
+        if warnings:
+            print("vision warnings:")
+            for key, values in warnings.items():
+                print(f"  {key}: {values}")
     if not object_debug:
         print("object_debug: missing. Restart server with the updated code and run a new dry-run.")
         return 1

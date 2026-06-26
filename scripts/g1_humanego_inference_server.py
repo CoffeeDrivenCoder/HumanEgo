@@ -115,6 +115,263 @@ def read_matrix(mapping: dict[str, Any], key: str) -> np.ndarray:
     return np.asarray(mapping[key], dtype=np.float64).reshape(4, 4)
 
 
+def matrix_from(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    try:
+        arr = np.asarray(value, dtype=np.float64)
+    except Exception:
+        return None
+    if arr.size != 16:
+        return None
+    return arr.reshape(4, 4)
+
+
+def project_point(K: np.ndarray, point_cam: np.ndarray) -> tuple[int, int] | None:
+    x, y, z = [float(v) for v in point_cam[:3]]
+    if not np.isfinite([x, y, z]).all() or z <= 1e-9:
+        return None
+    u = float(K[0, 0]) * x / z + float(K[0, 2])
+    v = float(K[1, 1]) * y / z + float(K[1, 2])
+    if not np.isfinite([u, v]).all():
+        return None
+    return int(round(u)), int(round(v))
+
+
+def draw_text(
+    image: np.ndarray,
+    text: str,
+    xy: tuple[int, int],
+    color: tuple[int, int, int] = (255, 255, 255),
+    scale: float = 0.45,
+) -> None:
+    cv2.putText(image, text, xy, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(image, text, xy, cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
+
+
+def draw_marker(
+    image: np.ndarray,
+    uv: tuple[int, int],
+    label: str,
+    color: tuple[int, int, int],
+    radius: int = 7,
+) -> None:
+    h, w = image.shape[:2]
+    u, v = uv
+    u_clip = int(np.clip(u, 0, w - 1))
+    v_clip = int(np.clip(v, 0, h - 1))
+    in_view = 0 <= u < w and 0 <= v < h
+    cv2.circle(image, (u_clip, v_clip), radius, color, 2, cv2.LINE_AA)
+    cv2.drawMarker(image, (u_clip, v_clip), color, cv2.MARKER_CROSS, 18, 2, cv2.LINE_AA)
+    suffix = "" if in_view else " off"
+    draw_text(image, f"{label}{suffix}", (min(u_clip + 9, w - 120), max(v_clip - 8, 16)), color)
+
+
+def first_right_preview(response: dict[str, Any]) -> dict[str, Any]:
+    return ((((response.get("policy_preview") or {}).get("sides") or {}).get("right") or [{}])[0]) or {}
+
+
+def save_depth_colormap(depth_m: np.ndarray | None, run_dir: Path) -> str | None:
+    if depth_m is None:
+        return None
+    depth = np.asarray(depth_m, dtype=np.float32)
+    valid = np.isfinite(depth) & (depth > 0)
+    if not np.any(valid):
+        return None
+    lo, hi = np.percentile(depth[valid], [2, 98])
+    if not np.isfinite([lo, hi]).all() or hi <= lo:
+        lo, hi = float(np.min(depth[valid])), float(np.max(depth[valid]))
+    norm = np.zeros(depth.shape, dtype=np.uint8)
+    norm[valid] = np.clip((depth[valid] - lo) / max(float(hi - lo), 1e-6) * 255.0, 0, 255).astype(np.uint8)
+    color = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
+    color[~valid] = (0, 0, 0)
+    draw_text(color, f"depth_m p02={lo:.3f} p98={hi:.3f}", (10, 22), (255, 255, 255), 0.55)
+    out = run_dir / "depth_colormap.jpg"
+    cv2.imwrite(str(out), color)
+    return str(out)
+
+
+def collect_projection_poses(response: dict[str, Any]) -> dict[str, np.ndarray]:
+    input_summary = response.get("input_summary") or {}
+    poses: dict[str, np.ndarray] = {}
+    for key, item in (input_summary.get("objects") or {}).items():
+        T = matrix_from((item or {}).get("T_in_cam"))
+        if T is not None:
+            poses[str(key)] = T
+    T_current = matrix_from(input_summary.get("current_T_tcp_in_cam"))
+    if T_current is not None:
+        poses["tcp"] = T_current
+    T_target = matrix_from(first_right_preview(response).get("T_tcp_target_in_cam"))
+    if T_target is not None:
+        poses["target"] = T_target
+    return poses
+
+
+def save_projection_layers(response: dict[str, Any], rgb_bgr: np.ndarray, run_dir: Path) -> dict[str, str]:
+    input_summary = response.get("input_summary") or {}
+    K = np.asarray(input_summary.get("K"), dtype=np.float64).reshape(3, 3)
+    poses = collect_projection_poses(response)
+    colors = {
+        "obj1": (30, 220, 30),
+        "obj2": (40, 170, 255),
+        "tcp": (255, 220, 40),
+        "target": (255, 40, 220),
+    }
+    layer_labels = {
+        "objects": {"obj1", "obj2"},
+        "tcp": {"tcp", "target"},
+        "all": {"obj1", "obj2", "tcp", "target"},
+    }
+    files: dict[str, str] = {}
+    for layer, labels in layer_labels.items():
+        image = rgb_bgr.copy()
+        projected: dict[str, tuple[int, int]] = {}
+        for label, T in poses.items():
+            if label not in labels:
+                continue
+            uv = project_point(K, T[:3, 3])
+            if uv is None:
+                continue
+            projected[label] = uv
+            draw_marker(image, uv, label, colors.get(label, (255, 255, 255)))
+        if {"tcp", "target"}.issubset(projected):
+            cv2.arrowedLine(
+                image,
+                projected["tcp"],
+                projected["target"],
+                colors["target"],
+                2,
+                cv2.LINE_AA,
+                tipLength=0.12,
+            )
+        draw_text(image, f"projection_{layer} | {run_dir.name}", (10, 22), (255, 255, 255), 0.55)
+        out = run_dir / f"vision_projection_{layer}.jpg"
+        cv2.imwrite(str(out), image)
+        files[layer] = str(out)
+    return files
+
+
+def object_warning_summary(response: dict[str, Any]) -> dict[str, Any]:
+    object_debug = ((response.get("input_summary") or {}).get("object_debug") or {}).get("objects") or {}
+    objects = (response.get("input_summary") or {}).get("objects") or {}
+    summary: dict[str, Any] = {}
+    for key, item in object_debug.items():
+        points = item.get("points") or {}
+        T = matrix_from((objects.get(key) or {}).get("T_in_cam"))
+        extent = [float(v) for v in points.get("points_extent_m") or []]
+        depth_min = points.get("valid_depth_min_m")
+        depth_max = points.get("valid_depth_max_m")
+        depth_range = None
+        if depth_min is not None and depth_max is not None:
+            depth_range = float(depth_max) - float(depth_min)
+        warnings: list[str] = []
+        if depth_range is not None and depth_range > 0.45:
+            warnings.append(f"large_depth_range:{depth_range:.3f}m")
+        if extent and max(extent) > 0.45:
+            warnings.append(f"large_extent:{max(extent):.3f}m")
+        valid_ratio = float(points.get("valid_depth_ratio_raw_mask") or 0.0)
+        if valid_ratio < 0.75:
+            warnings.append(f"low_valid_depth_ratio:{valid_ratio:.3f}")
+        summary[key] = {
+            "prompt": item.get("prompt"),
+            "xyz_cam_m": None if T is None else [float(v) for v in T[:3, 3]],
+            "mask_pixels": points.get("raw_mask_pixels"),
+            "valid_depth_pixels": points.get("valid_depth_pixels"),
+            "valid_depth_ratio": valid_ratio,
+            "depth_min_m": depth_min,
+            "depth_median_m": points.get("valid_depth_median_m"),
+            "depth_max_m": depth_max,
+            "depth_range_m": depth_range,
+            "extent_m": extent,
+            "valid_uv_bbox": points.get("valid_uv_bbox"),
+            "warnings": warnings,
+        }
+    return summary
+
+
+def make_contact_sheet(panels: list[tuple[str, np.ndarray]], out_path: Path, cell_w: int = 360) -> str | None:
+    if not panels:
+        return None
+    prepared = []
+    for title, image in panels:
+        if image is None:
+            continue
+        h, w = image.shape[:2]
+        scale = cell_w / max(float(w), 1.0)
+        cell_h = max(1, int(round(h * scale)))
+        resized = cv2.resize(image, (cell_w, cell_h), interpolation=cv2.INTER_AREA)
+        header = np.zeros((28, cell_w, 3), dtype=np.uint8)
+        draw_text(header, title[:44], (8, 19), (255, 255, 255), 0.48)
+        prepared.append(np.vstack([header, resized]))
+    if not prepared:
+        return None
+    cell_h = max(img.shape[0] for img in prepared)
+    padded = []
+    for img in prepared:
+        if img.shape[0] < cell_h:
+            pad = np.zeros((cell_h - img.shape[0], img.shape[1], 3), dtype=np.uint8)
+            img = np.vstack([img, pad])
+        padded.append(img)
+    cols = 2
+    rows = []
+    for i in range(0, len(padded), cols):
+        row_items = padded[i : i + cols]
+        if len(row_items) < cols:
+            row_items.append(np.zeros_like(padded[0]))
+        rows.append(np.hstack(row_items))
+    sheet = np.vstack(rows)
+    cv2.imwrite(str(out_path), sheet)
+    return str(out_path)
+
+
+def save_vision_diagnostics(
+    response: dict[str, Any],
+    rgb_bgr: np.ndarray,
+    depth_m: np.ndarray | None,
+    run_dir: Path,
+) -> dict[str, Any]:
+    files: dict[str, Any] = {}
+    projection_files = save_projection_layers(response, rgb_bgr, run_dir)
+    files["projection"] = projection_files
+    depth_path = save_depth_colormap(depth_m, run_dir)
+    if depth_path:
+        files["depth_colormap"] = depth_path
+
+    panels: list[tuple[str, np.ndarray]] = [("rgb", rgb_bgr)]
+    for label, path in projection_files.items():
+        image = cv2.imread(path, cv2.IMREAD_COLOR)
+        if image is not None:
+            panels.append((f"projection_{label}", image))
+    if depth_path:
+        depth_img = cv2.imread(depth_path, cv2.IMREAD_COLOR)
+        if depth_img is not None:
+            panels.append(("depth_colormap", depth_img))
+    object_debug = ((response.get("input_summary") or {}).get("object_debug") or {}).get("objects") or {}
+    for obj_key in sorted(object_debug.keys()):
+        saved = object_debug[obj_key].get("saved_files") or {}
+        for kind in ("mask_overlay", "valid_depth_overlay", "circle_candidates"):
+            path = saved.get(kind)
+            if not path:
+                continue
+            image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+            if image is not None:
+                panels.append((f"{obj_key}_{kind}", image))
+    contact = make_contact_sheet(panels, run_dir / "vision_contact_sheet.jpg")
+    if contact:
+        files["contact_sheet"] = contact
+
+    summary = {
+        "object_source_used": (response.get("input_summary") or {}).get("object_source_used"),
+        "object_error": (response.get("input_summary") or {}).get("object_error"),
+        "objects": object_warning_summary(response),
+        "files": files,
+    }
+    summary_path = run_dir / "vision_summary.json"
+    summary_path.write_text(json.dumps(json_safe(summary), ensure_ascii=False, indent=2), encoding="utf-8")
+    summary["files"]["summary"] = str(summary_path)
+    return summary
+
+
 def safe_request_id(value: Any) -> str:
     request_id = str(value or utc_stamp())
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in request_id)
@@ -254,6 +511,15 @@ class InferenceRuntime:
             "policy_preview": preview,
             "latency_s": time.time() - started,
         }
+        try:
+            response["vision_summary"] = save_vision_diagnostics(response, rgb_bgr, depth_m, run_dir)
+        except Exception as exc:
+            response["vision_summary"] = {
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
         self._log_request(payload, response, rgb_bgr, run_dir=run_dir)
         return response
 
