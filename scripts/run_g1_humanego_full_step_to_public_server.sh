@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run one complete HumanEgo model step on the G1 robot/client side.
+# This intentionally uses the model's raw 6D target pose and gripper output.
+# The operator must press Enter before execution.
+
+cd "$(dirname "$0")/.."
+
+export G1_HUMANEGO_TAG="${G1_HUMANEGO_TAG:-full_step_raw_pose_gripper}"
+export G1_HUMANEGO_CONTROL_MODE="prompt"
+export G1_HUMANEGO_CONFIRM="${G1_HUMANEGO_CONFIRM:-RUN_CONTROL}"
+export G1_HUMANEGO_MAX_STEPS="${G1_HUMANEGO_MAX_STEPS:-1}"
+export G1_HUMANEGO_SEND_DEPTH="${G1_HUMANEGO_SEND_DEPTH:-true}"
+export G1_HUMANEGO_OBJECT_LOCK="${G1_HUMANEGO_OBJECT_LOCK:-base_after_first}"
+export G1_HUMANEGO_OBJECT_LOCK_REQUIRE_CLEAN="${G1_HUMANEGO_OBJECT_LOCK_REQUIRE_CLEAN:-true}"
+export G1_HUMANEGO_TARGET_SOURCE="raw"
+export G1_HUMANEGO_TARGET_ADAPTER="full"
+export G1_HUMANEGO_TARGET_Z_BIAS_M="0.0"
+export G1_HUMANEGO_EXECUTE_GRIPPER="true"
+export G1_HUMANEGO_GRIPPER_SOURCE="${G1_HUMANEGO_GRIPPER_SOURCE:-model}"
+export G1_HUMANEGO_EXECUTE_S="${G1_HUMANEGO_EXECUTE_S:-1.5}"
+export G1_HUMANEGO_SEND_HZ="${G1_HUMANEGO_SEND_HZ:-10}"
+export G1_HUMANEGO_SETTLE_S="${G1_HUMANEGO_SETTLE_S:-1.0}"
+export G1_HUMANEGO_GRIPPER_SETTLE_S="${G1_HUMANEGO_GRIPPER_SETTLE_S:-0.5}"
+export G1_HUMANEGO_APPROACH_OBJECT_KEY="${G1_HUMANEGO_APPROACH_OBJECT_KEY:-obj1}"
+
+bash scripts/run_g1_humanego_interactive_step_to_public_server.sh "$@"
