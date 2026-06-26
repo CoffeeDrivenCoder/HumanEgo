@@ -32,6 +32,12 @@ LIFETIME="${G1_HUMANEGO_LIFETIME:-1.5}"
 SEND_HZ="${G1_HUMANEGO_SEND_HZ:-20}"
 EXECUTE_S="${G1_HUMANEGO_EXECUTE_S:-3.0}"
 SETTLE_S="${G1_HUMANEGO_SETTLE_S:-1.5}"
+EXECUTE_GRIPPER="${G1_HUMANEGO_EXECUTE_GRIPPER:-false}"
+GRIPPER_SOURCE="${G1_HUMANEGO_GRIPPER_SOURCE:-model}"
+GRIPPER_TARGET="${G1_HUMANEGO_GRIPPER_TARGET:-}"
+GRIPPER_MIN="${G1_HUMANEGO_GRIPPER_MIN:-0.0}"
+GRIPPER_MAX="${G1_HUMANEGO_GRIPPER_MAX:-1.0}"
+GRIPPER_SETTLE_S="${G1_HUMANEGO_GRIPPER_SETTLE_S:-0.5}"
 JPEG_QUALITY="${G1_HUMANEGO_JPEG_QUALITY:-75}"
 SEND_WIDTH="${G1_HUMANEGO_SEND_WIDTH:-640}"
 SEND_HEIGHT="${G1_HUMANEGO_SEND_HEIGHT:-400}"
@@ -44,6 +50,16 @@ UPLOAD_TIMEOUT_S="${G1_HUMANEGO_UPLOAD_TIMEOUT_S:-20}"
 SEND_DEPTH_ARG="--no-send-depth"
 if [[ "$SEND_DEPTH" == "true" || "$SEND_DEPTH" == "1" ]]; then
   SEND_DEPTH_ARG="--send-depth"
+fi
+
+EXECUTE_GRIPPER_ARG="--no-execute-gripper"
+if [[ "$EXECUTE_GRIPPER" == "true" || "$EXECUTE_GRIPPER" == "1" ]]; then
+  EXECUTE_GRIPPER_ARG="--execute-gripper"
+fi
+
+GRIPPER_TARGET_ARGS=()
+if [[ -n "$GRIPPER_TARGET" ]]; then
+  GRIPPER_TARGET_ARGS=(--gripper-target "$GRIPPER_TARGET")
 fi
 
 python3 scripts/g1_humanego_interactive_step_client.py \
@@ -65,6 +81,12 @@ python3 scripts/g1_humanego_interactive_step_client.py \
   --send-hz "$SEND_HZ" \
   --execute-s "$EXECUTE_S" \
   --settle-s "$SETTLE_S" \
+  "$EXECUTE_GRIPPER_ARG" \
+  --gripper-source "$GRIPPER_SOURCE" \
+  "${GRIPPER_TARGET_ARGS[@]}" \
+  --gripper-min "$GRIPPER_MIN" \
+  --gripper-max "$GRIPPER_MAX" \
+  --gripper-settle-s "$GRIPPER_SETTLE_S" \
   --jpeg-quality "$JPEG_QUALITY" \
   --send-width "$SEND_WIDTH" \
   --send-height "$SEND_HEIGHT" \

@@ -16,6 +16,7 @@ continuous control.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import sys
@@ -500,6 +501,124 @@ def call_ee_control(
     }
 
 
+def split_state_result(value: Any) -> tuple[Any, Any]:
+    if isinstance(value, tuple) and len(value) == 2:
+        return value[0], value[1]
+    return value, None
+
+
+def coerce_float_list(value: Any) -> list[float]:
+    data, _timestamp = split_state_result(value)
+    if isinstance(data, str):
+        data = ast.literal_eval(data)
+    if isinstance(data, (int, float)):
+        return [float(data)]
+    if data is None:
+        raise ValueError("gripper state is None")
+    values = list(data)
+    if not values:
+        raise ValueError("gripper state is empty")
+    if any(v is None for v in values):
+        raise ValueError(f"gripper state contains None values: {values!r}")
+    return [float(v) for v in values]
+
+
+def gripper_index(side: str, num_values: int) -> int:
+    if num_values <= 0:
+        raise ValueError("cannot select gripper index from empty values")
+    if side == "left":
+        return 0
+    return min(1, num_values - 1)
+
+
+def read_gripper_state(robot: Any, side: str) -> dict[str, Any]:
+    raw_result = robot.gripper_states()
+    data, timestamp = split_state_result(raw_result)
+    values = coerce_float_list(raw_result)
+    idx = gripper_index(side, len(values))
+    return {
+        "raw_result": json_safe(raw_result),
+        "data": json_safe(data),
+        "timestamp": json_safe(timestamp),
+        "values": values,
+        "side": side,
+        "selected_index": idx,
+        "selected_raw": values[idx],
+    }
+
+
+def gripper_model_command(step_preview: dict[str, Any]) -> float:
+    if "gripper_humanego_0_open_1_closed" in step_preview:
+        return float(step_preview["gripper_humanego_0_open_1_closed"])
+    return float(step_preview["gripper_g1_raw_0_open_120_closed"]) / 120.0
+
+
+def select_gripper_command(step_preview: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    source = args.gripper_source
+    if source == "model":
+        value = gripper_model_command(step_preview)
+    elif source == "hold":
+        value = None
+    elif source == "open":
+        value = 0.0
+    elif source == "closed":
+        value = 1.0
+    elif source == "manual":
+        if args.gripper_target is None:
+            raise ValueError("--gripper-target is required when --gripper-source manual")
+        value = float(args.gripper_target)
+    else:
+        raise ValueError(f"unknown gripper source: {source}")
+
+    clipped = False
+    raw_value = value
+    if value is not None:
+        clipped_value = float(np.clip(value, args.gripper_min, args.gripper_max))
+        clipped = abs(clipped_value - value) > EPS
+        value = clipped_value
+
+    return {
+        "source": source,
+        "raw_command_0_open_1_closed": raw_value,
+        "command_0_open_1_closed": value,
+        "clipped": clipped,
+        "min": float(args.gripper_min),
+        "max": float(args.gripper_max),
+        "state_estimate_0_open_120_closed": None if value is None else float(value) * 120.0,
+    }
+
+
+def call_gripper_control_once(robot: Any, side: str, command: float | None) -> dict[str, Any]:
+    before = read_gripper_state(robot, side)
+    values = list(before["values"])
+    idx = gripper_index(side, len(values))
+    if command is None:
+        values[idx] = before["selected_raw"]
+    else:
+        values[idx] = float(command)
+    payload: Any = values[0] if len(values) == 1 else values
+    started = time.time()
+    try:
+        result = robot.move_gripper(payload)
+        return {
+            "ok": True,
+            "duration_s": time.time() - started,
+            "before": before,
+            "payload": json_safe(payload),
+            "result": json_safe(result),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "duration_s": time.time() - started,
+            "before": before,
+            "payload": json_safe(payload),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
 def prompt_operator() -> str:
     try:
         text = input("[Enter]=execute one step, s=skip/replan, q=quit > ")
@@ -540,6 +659,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--send-hz", type=float, default=10.0)
     parser.add_argument("--execute-s", type=float, default=1.0)
     parser.add_argument("--settle-s", type=float, default=1.0)
+    parser.add_argument("--execute-gripper", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--gripper-source", choices=["model", "hold", "open", "closed", "manual"], default="model")
+    parser.add_argument("--gripper-target", type=float, default=None)
+    parser.add_argument("--gripper-min", type=float, default=0.0)
+    parser.add_argument("--gripper-max", type=float, default=1.0)
+    parser.add_argument("--gripper-settle-s", type=float, default=0.5)
     parser.add_argument("--jpeg-quality", type=int, default=75)
     parser.add_argument("--send-width", type=int, default=320)
     parser.add_argument("--send-height", type=int, default=240)
@@ -661,6 +786,7 @@ def main() -> int:
                 target_alignment = axis_alignment_to_object(target_T_link7, T_tcp_in_link7, object_base)
                 raw_alignment_improvement = alignment_improvement(current_alignment, raw_alignment)
                 target_alignment_improvement = alignment_improvement(current_alignment, target_alignment)
+            gripper_command = select_gripper_command(step_preview, args)
 
             print("\n=== HumanEgo proposed step ===")
             print(f"step: {idx}")
@@ -691,7 +817,18 @@ def main() -> int:
                 )
             print(f"server raw_delta_norm_m: {step_preview['safety_translation_limit']['raw_delta_norm_m']:.4f}")
             print(f"server clipped: {step_preview['safety_translation_limit']['clipped']}")
-            print(f"gripper target raw: {step_preview['gripper_g1_raw_0_open_120_closed']:.2f} / 120 (not executed)")
+            if gripper_command["command_0_open_1_closed"] is None:
+                gripper_text = "hold current"
+            else:
+                gripper_text = (
+                    f"{gripper_command['command_0_open_1_closed']:.3f} "
+                    f"(~{gripper_command['state_estimate_0_open_120_closed']:.1f}/120)"
+                )
+            print(
+                "gripper target: "
+                f"{gripper_text}, source={gripper_command['source']}, "
+                f"execute={args.execute_gripper}"
+            )
             if approach_metrics:
                 print(
                     f"distance link7->{args.approach_object_key}: "
@@ -717,6 +854,7 @@ def main() -> int:
                 "target_delta_m": target_delta.tolist(),
                 "target_delta_norm_m": target_delta_norm,
                 "target_rotation_delta_deg": target_rotation_delta_deg,
+                "gripper_command": gripper_command,
                 "approach_metrics": approach_metrics,
                 "axis_alignment": {
                     "current": current_alignment,
@@ -758,6 +896,34 @@ def main() -> int:
             report["control_sent"] = True
             step_record["executed"] = bool(control_result.get("ok"))
             step_record["control_result"] = control_result
+
+            gripper_result = None
+            if args.execute_gripper:
+                log(
+                    f"step {idx}: executing gripper target "
+                    f"{gripper_command['command_0_open_1_closed']}"
+                )
+                gripper_result = call_gripper_control_once(
+                    arm.robot,
+                    args.side,
+                    gripper_command["command_0_open_1_closed"],
+                )
+                time.sleep(max(0.0, float(args.gripper_settle_s)))
+                gripper_result["after"] = read_gripper_state(arm.robot, args.side)
+                before_raw = float(gripper_result["before"]["selected_raw"])
+                after_raw = float(gripper_result["after"]["selected_raw"])
+                gripper_result["observed_delta_raw"] = after_raw - before_raw
+                log(
+                    f"step {idx}: gripper before={before_raw:.4f} "
+                    f"after={after_raw:.4f} delta={after_raw - before_raw:+.4f}"
+                )
+            else:
+                gripper_result = {
+                    "executed": False,
+                    "reason": "--execute-gripper not set",
+                    "before": read_gripper_state(arm.robot, args.side),
+                }
+            step_record["gripper_result"] = gripper_result
 
             immediate_T_link7 = arm.get_T_link7_in_base()
             immediate_delta = immediate_T_link7[:3, 3] - before_T_link7[:3, 3]
