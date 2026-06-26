@@ -30,6 +30,7 @@ SAMPLE_INTERVAL_S="${G1_GRIPPER_SAMPLE_INTERVAL_S:-0.1}"
 CHANGE_THRESHOLD="${G1_GRIPPER_CHANGE_THRESHOLD:-0.005}"
 PROMPT="${G1_GRIPPER_PROMPT:-true}"
 CLOSE_ROBOT="${G1_GRIPPER_CLOSE_ROBOT:-false}"
+FORCE_EXIT="${G1_GRIPPER_FORCE_EXIT:-true}"
 UPLOAD_TIMEOUT_S="${G1_DIAG_UPLOAD_TIMEOUT_S:-20}"
 
 PROMPT_ARG="--prompt"
@@ -40,6 +41,11 @@ fi
 CLOSE_ARG="--no-close-robot"
 if [[ "$CLOSE_ROBOT" == "true" || "$CLOSE_ROBOT" == "1" ]]; then
   CLOSE_ARG="--close-robot"
+fi
+
+FORCE_EXIT_ARG="--force-exit"
+if [[ "$FORCE_EXIT" == "false" || "$FORCE_EXIT" == "0" ]]; then
+  FORCE_EXIT_ARG="--no-force-exit"
 fi
 
 TARGET_ARGS=()
@@ -64,6 +70,7 @@ python3 scripts/g1_verify_gripper_control.py \
   --change-threshold "$CHANGE_THRESHOLD" \
   "$PROMPT_ARG" \
   "$CLOSE_ARG" \
+  "$FORCE_EXIT_ARG" \
   --upload-timeout-s "$UPLOAD_TIMEOUT_S" \
   --upload-url "$UPLOAD_URL" \
   "$@"

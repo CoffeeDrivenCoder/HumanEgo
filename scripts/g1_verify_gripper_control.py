@@ -308,6 +308,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--change-threshold", type=float, default=0.005)
     parser.add_argument("--prompt", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--close-robot", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--force-exit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--upload-url", default="")
     parser.add_argument("--upload-timeout-s", type=float, default=20.0)
     return parser
@@ -443,9 +444,14 @@ def main() -> int:
             "error": report.get("error"),
         }
         print(json.dumps(json_safe(summary), ensure_ascii=False, indent=2))
+        sys.stdout.flush()
+        sys.stderr.flush()
 
     return exit_code
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    if "--no-force-exit" not in sys.argv:
+        os._exit(exit_code)
+    raise SystemExit(exit_code)
