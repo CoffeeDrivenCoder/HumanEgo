@@ -220,6 +220,8 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
     gripper_result = step_record.get("gripper_result") or {}
     gripper_before = (gripper_result.get("before") or {}).get("selected_raw")
     gripper_after = (gripper_result.get("after") or {}).get("selected_raw")
+    gripper_before_values = (gripper_result.get("before") or {}).get("values")
+    gripper_after_values = (gripper_result.get("after") or {}).get("values")
     post_ee_tracking = step_record.get("post_ee_translation_tracking") or {}
     settled_tracking = step_record.get("settled_translation_tracking") or {}
     approach = step_record.get("approach_metrics") or {}
@@ -260,6 +262,9 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
         "gripper_before_raw": gripper_before,
         "gripper_after_raw": gripper_after,
         "gripper_delta_raw": gripper_result.get("observed_delta_raw"),
+        "gripper_before_values_raw": gripper_before_values,
+        "gripper_after_values_raw": gripper_after_values,
+        "gripper_delta_values_raw": gripper_result.get("observed_delta_values_raw"),
         "tcp_current_best_axis": (axis.get("current") or {}).get("best_axis"),
         "tcp_current_angle_deg": (axis.get("current") or {}).get("best_angle_to_object_deg"),
         "tcp_target_best_axis": (axis.get("target") or {}).get("best_axis"),
@@ -677,6 +682,21 @@ def gripper_index(side: str, num_values: int) -> int:
     return min(1, num_values - 1)
 
 
+def state_to_gripper_command_value(value: float, state_max_raw: float = 120.0) -> float:
+    value = float(value)
+    state_max_raw = float(state_max_raw)
+    if state_max_raw > 1.0 and abs(value) > 1.0:
+        return value / state_max_raw
+    return value
+
+
+def gripper_command_to_state_estimate(value: float, state_max_raw: float = 120.0) -> float:
+    state_max_raw = float(state_max_raw)
+    if state_max_raw > 1.0:
+        return float(value) * state_max_raw
+    return float(value)
+
+
 def read_gripper_state(robot: Any, side: str) -> dict[str, Any]:
     raw_result = robot.gripper_states()
     data, timestamp = split_state_result(raw_result)
@@ -736,13 +756,14 @@ def select_gripper_command(step_preview: dict[str, Any], args: argparse.Namespac
 
 def call_gripper_control_once(robot: Any, side: str, command: float | None) -> dict[str, Any]:
     before = read_gripper_state(robot, side)
-    values = list(before["values"])
-    idx = gripper_index(side, len(values))
+    before_values = [float(v) for v in before["values"]]
+    command_values = [state_to_gripper_command_value(v) for v in before_values]
+    idx = gripper_index(side, len(command_values))
     if command is None:
-        values[idx] = before["selected_raw"]
+        command_values[idx] = state_to_gripper_command_value(before["selected_raw"])
     else:
-        values[idx] = float(command)
-    payload: Any = values[0] if len(values) == 1 else values
+        command_values[idx] = float(command)
+    payload: Any = command_values[0] if len(command_values) == 1 else command_values
     started = time.time()
     try:
         result = robot.move_gripper(payload)
@@ -750,6 +771,11 @@ def call_gripper_control_once(robot: Any, side: str, command: float | None) -> d
             "ok": True,
             "duration_s": time.time() - started,
             "before": before,
+            "target_command_values_0_open_1_closed": command_values,
+            "target_state_estimate_values_raw": [
+                gripper_command_to_state_estimate(v) for v in command_values
+            ],
+            "selected_index": idx,
             "payload": json_safe(payload),
             "result": json_safe(result),
         }
@@ -1149,6 +1175,14 @@ def main() -> int:
                 before_raw = float(gripper_result["before"]["selected_raw"])
                 after_raw = float(gripper_result["after"]["selected_raw"])
                 gripper_result["observed_delta_raw"] = after_raw - before_raw
+                before_values = [float(v) for v in gripper_result["before"]["values"]]
+                after_values = [float(v) for v in gripper_result["after"]["values"]]
+                gripper_result["observed_delta_values_raw"] = [
+                    after_v - before_v for before_v, after_v in zip(before_values, after_values)
+                ]
+                gripper_result["after_command_values_0_open_1_closed"] = [
+                    state_to_gripper_command_value(v) for v in after_values
+                ]
                 post_gripper_T_link7 = arm.get_T_link7_in_base()
                 post_gripper_delta = post_gripper_T_link7[:3, 3] - before_T_link7[:3, 3]
                 gripper_result["post_gripper_T_link7_in_base"] = post_gripper_T_link7.tolist()
@@ -1164,6 +1198,11 @@ def main() -> int:
                 log(
                     f"step {idx}: gripper before={before_raw:.4f} "
                     f"after={after_raw:.4f} delta={after_raw - before_raw:+.4f}"
+                )
+                log(
+                    f"step {idx}: gripper all_before={before_values} "
+                    f"all_after={after_values} "
+                    f"all_delta={gripper_result['observed_delta_values_raw']}"
                 )
                 log(
                     f"step {idx}: post_gripper_arm_delta={post_gripper_delta.tolist()} "
