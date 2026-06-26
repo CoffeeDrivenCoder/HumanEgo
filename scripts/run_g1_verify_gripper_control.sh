@@ -24,6 +24,7 @@ TARGET_RAW="${G1_GRIPPER_TARGET_RAW:-}"
 PAYLOAD_FORMAT="${G1_GRIPPER_PAYLOAD_FORMAT:-auto}"
 MIN_RAW="${G1_GRIPPER_MIN_RAW:-0.0}"
 MAX_RAW="${G1_GRIPPER_MAX_RAW:-1.0}"
+STATE_MAX_RAW="${G1_GRIPPER_STATE_MAX_RAW:-120.0}"
 SETTLE_S="${G1_GRIPPER_SETTLE_S:-1.0}"
 SAMPLES="${G1_GRIPPER_SAMPLES:-3}"
 SAMPLE_INTERVAL_S="${G1_GRIPPER_SAMPLE_INTERVAL_S:-0.1}"
@@ -64,6 +65,7 @@ python3 scripts/g1_verify_gripper_control.py \
   --payload-format "$PAYLOAD_FORMAT" \
   --min-raw "$MIN_RAW" \
   --max-raw "$MAX_RAW" \
+  --state-max-raw "$STATE_MAX_RAW" \
   --settle-s "$SETTLE_S" \
   --samples "$SAMPLES" \
   --sample-interval-s "$SAMPLE_INTERVAL_S" \

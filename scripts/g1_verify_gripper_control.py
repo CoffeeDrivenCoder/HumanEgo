@@ -169,14 +169,32 @@ def clip_value(value: float, low: float, high: float) -> float:
     return min(max(float(value), float(low)), float(high))
 
 
+def state_to_command_value(value: float, state_max_raw: float) -> float:
+    value = float(value)
+    state_max_raw = float(state_max_raw)
+    if state_max_raw > 1.0 and abs(value) > 1.0:
+        return value / state_max_raw
+    return value
+
+
+def command_to_state_estimate(value: float, state_max_raw: float) -> float:
+    state_max_raw = float(state_max_raw)
+    if state_max_raw > 1.0:
+        return float(value) * state_max_raw
+    return float(value)
+
+
 def build_command_values(before_values: List[float], args: argparse.Namespace) -> tuple[List[float], Dict[str, Any]]:
-    command_values = list(before_values)
+    base_command_values = [state_to_command_value(v, args.state_max_raw) for v in before_values]
+    command_values = list(base_command_values)
     indices = selected_gripper_indices(args.side, len(command_values))
     info: Dict[str, Any] = {
         "mode": args.mode,
         "side": args.side,
         "selected_indices": indices,
-        "before_values": list(before_values),
+        "before_state_values": list(before_values),
+        "base_command_values": list(base_command_values),
+        "state_max_raw": float(args.state_max_raw),
         "clip": bool(args.clip),
         "min_raw": args.min_raw,
         "max_raw": args.max_raw,
@@ -234,9 +252,11 @@ def sample_states(robot: Any, side: str, samples: int, interval_s: float) -> Lis
 
 def analyze_delta(
     before: Dict[str, Any],
+    before_command_values: List[float],
     target_values: List[float],
     after: Dict[str, Any],
     side: str,
+    state_max_raw: float,
     change_threshold: float,
 ) -> Dict[str, Any]:
     before_values = before["values"]
@@ -249,19 +269,33 @@ def analyze_delta(
         before_v = float(before_values[idx])
         target_v = float(target_values[idx])
         after_v = float(after_values[idx])
+        before_command_v = float(before_command_values[idx])
+        after_command_est = state_to_command_value(after_v, state_max_raw)
+        target_state_est = command_to_state_estimate(target_v, state_max_raw)
         observed_delta = after_v - before_v
-        commanded_delta = target_v - before_v
+        observed_command_delta_est = after_command_est - before_command_v
+        commanded_delta = target_v - before_command_v
+        expected_state_delta = target_state_est - before_v
         idx_changed = abs(observed_delta) >= float(change_threshold)
-        idx_toward = abs(after_v - target_v) < abs(before_v - target_v) if abs(commanded_delta) > 1e-12 else True
+        idx_toward = (
+            abs(after_v - target_state_est) < abs(before_v - target_state_est)
+            if abs(commanded_delta) > 1e-12
+            else True
+        )
         changed = changed or idx_changed
         moved_toward_target = moved_toward_target or idx_toward
         per_index[str(idx)] = {
-            "before": before_v,
-            "target": target_v,
-            "after": after_v,
-            "commanded_delta": commanded_delta,
-            "observed_delta": observed_delta,
-            "target_error": after_v - target_v,
+            "before_state": before_v,
+            "before_command_estimate": before_command_v,
+            "target_command": target_v,
+            "target_state_estimate": target_state_est,
+            "after_state": after_v,
+            "after_command_estimate": after_command_est,
+            "commanded_delta_command": commanded_delta,
+            "expected_delta_state": expected_state_delta,
+            "observed_delta_state": observed_delta,
+            "observed_delta_command_estimate": observed_command_delta_est,
+            "target_state_error": after_v - target_state_est,
             "changed": idx_changed,
             "moved_toward_target": idx_toward,
         }
@@ -302,6 +336,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clip", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--min-raw", type=float, default=0.0)
     parser.add_argument("--max-raw", type=float, default=1.0)
+    parser.add_argument("--state-max-raw", type=float, default=120.0)
     parser.add_argument("--settle-s", type=float, default=1.0)
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--sample-interval-s", type=float, default=0.1)
@@ -385,9 +420,11 @@ def main() -> int:
                 report["after"] = after
                 report["delta_analysis"] = analyze_delta(
                     before,
+                    command_info["base_command_values"],
                     command_values,
                     after,
                     args.side,
+                    args.state_max_raw,
                     args.change_threshold,
                 )
                 call_ok = bool(report["move_gripper_call"].get("ok"))
