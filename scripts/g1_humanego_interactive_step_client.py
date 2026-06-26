@@ -86,7 +86,13 @@ def compact_pose(pose: dict[str, Any]) -> str:
     )
 
 
-def build_payload(frame: Any, state: dict[str, Any], args: argparse.Namespace, request_id: str) -> dict[str, Any]:
+def build_payload(
+    frame: Any,
+    state: dict[str, Any],
+    args: argparse.Namespace,
+    request_id: str,
+    locked_objects: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     rgb_send, K_send, image_send_info = resize_image_and_K(
         frame.rgb,
         frame.K,
@@ -136,6 +142,22 @@ def build_payload(frame: Any, state: dict[str, Any], args: argparse.Namespace, r
     if depth_b64 is not None:
         payload["depth_m_npz_b64"] = depth_b64
         payload["depth_encoding"] = depth_send_info
+    if locked_objects:
+        T_base_in_cam = np.asarray(state["T_base_in_cam"], dtype=np.float64).reshape(4, 4)
+        payload_objects: dict[str, Any] = {}
+        for key, item in locked_objects.items():
+            T_obj_in_base = np.asarray(item["T_in_base"], dtype=np.float64).reshape(4, 4)
+            T_obj_in_cam = T_base_in_cam @ T_obj_in_base
+            payload_objects[key] = {
+                "T_in_cam": T_obj_in_cam.tolist(),
+                "kpts_local": item.get("kpts_local", []),
+                "lock_source": item.get("lock_source"),
+            }
+        payload["objects"] = payload_objects
+        payload["object_lock"] = {
+            "mode": "base_static",
+            "object_keys": sorted(payload_objects.keys()),
+        }
     return payload
 
 
@@ -154,6 +176,44 @@ def T_from_pose_dict(pose: dict[str, float]) -> np.ndarray:
         dtype=np.float64,
     )
     return T
+
+
+def object_quality_warnings(response: dict[str, Any]) -> dict[str, list[str]]:
+    vision = response.get("vision_summary") or {}
+    out: dict[str, list[str]] = {}
+    for key, item in (vision.get("objects") or {}).items():
+        warnings = item.get("warnings") or []
+        if warnings:
+            out[str(key)] = [str(v) for v in warnings]
+    return out
+
+
+def lock_objects_in_base(response: dict[str, Any], state: dict[str, Any], request_id: str) -> dict[str, Any]:
+    objects = (response.get("input_summary") or {}).get("objects") or {}
+    T_base_camera = np.asarray(state["T_base_camera"], dtype=np.float64).reshape(4, 4)
+    locked: dict[str, Any] = {}
+    for key, item in objects.items():
+        T_obj_in_cam = np.asarray(item["T_in_cam"], dtype=np.float64).reshape(4, 4)
+        locked[str(key)] = {
+            "T_in_base": (T_base_camera @ T_obj_in_cam).tolist(),
+            "kpts_local": item.get("kpts_local", []),
+            "kpts_local_count": item.get("kpts_local_count"),
+            "lock_source": request_id,
+        }
+    return locked
+
+
+def locked_object_summary(locked_objects: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not locked_objects:
+        return None
+    return {
+        key: {
+            "T_in_base_xyz_m": [float(v) for v in np.asarray(item["T_in_base"], dtype=np.float64)[:3, 3]],
+            "kpts_local_count": item.get("kpts_local_count"),
+            "lock_source": item.get("lock_source"),
+        }
+        for key, item in locked_objects.items()
+    }
 
 
 def select_target(
@@ -656,6 +716,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--target-source", choices=["position_keep_orientation", "limited", "raw"], default="position_keep_orientation")
     parser.add_argument("--approach-object-key", default="obj1")
+    parser.add_argument("--object-lock", choices=["none", "base_after_first"], default="none")
+    parser.add_argument("--object-lock-require-clean", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--target-adapter",
         choices=[
@@ -717,6 +779,8 @@ def main() -> int:
 
     cam = None
     arm = None
+    locked_objects: dict[str, Any] | None = None
+    object_lock_blocked_reason = None
     try:
         from G1Camera import G1HeadRGBDCamera
         from G1RobotArm import G1RobotArmReadOnly
@@ -739,7 +803,13 @@ def main() -> int:
             log(f"step {idx}: reading current robot state")
             state = arm.get_debug_state()
             before_T_link7 = np.asarray(state["T_link7_in_base"], dtype=np.float64)
-            payload = build_payload(frame, state, args, request_id)
+            payload_locked_objects = locked_objects if args.object_lock == "base_after_first" and locked_objects else None
+            payload = build_payload(frame, state, args, request_id, locked_objects=payload_locked_objects)
+            if payload_locked_objects:
+                log(
+                    f"step {idx}: using locked base-frame objects "
+                    f"{sorted(payload_locked_objects.keys())}; server RGB-D segmentation bypassed"
+                )
 
             cv2.imwrite(str(step_dir / "rgb_sent_bgr.jpg"), frame.rgb if args.send_width <= 0 else cv2.resize(frame.rgb, (args.send_width, args.send_height)))
             request_summary = dict(payload)
@@ -760,6 +830,18 @@ def main() -> int:
                 json.dumps(json_safe(response), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            warnings = object_quality_warnings(response)
+            if args.object_lock == "base_after_first" and locked_objects is None:
+                if warnings and args.object_lock_require_clean:
+                    object_lock_blocked_reason = {
+                        "request_id": request_id,
+                        "reason": "vision warnings in first RGB-D detection",
+                        "warnings": warnings,
+                    }
+                    log(f"step {idx}: object lock blocked by vision warnings: {warnings}")
+                else:
+                    locked_objects = lock_objects_in_base(response, state, request_id)
+                    log(f"step {idx}: locked static base-frame objects: {sorted(locked_objects.keys())}")
 
             side_previews = response.get("policy_preview", {}).get("sides", {}).get(args.side) or []
             if not side_previews:
@@ -811,6 +893,13 @@ def main() -> int:
             print(f"step: {idx}")
             print(f"done_prob: {response['policy_preview']['done_prob']:.3f}")
             print(f"object_source: {response.get('input_summary', {}).get('object_source_used')}")
+            if args.object_lock != "none":
+                lock_state = "active" if locked_objects else "pending"
+                if object_lock_blocked_reason:
+                    lock_state = f"blocked: {object_lock_blocked_reason.get('warnings')}"
+                print(f"object_lock: {args.object_lock} ({lock_state})")
+                if warnings:
+                    print(f"vision_warnings: {warnings}")
             object_error = response.get("input_summary", {}).get("object_error")
             if object_error:
                 print(f"object_error: {object_error.get('error_type')}: {object_error.get('error')}")
@@ -874,6 +963,11 @@ def main() -> int:
                 "target_delta_norm_m": target_delta_norm,
                 "target_rotation_delta_deg": target_rotation_delta_deg,
                 "gripper_command": gripper_command,
+                "object_lock_mode": args.object_lock,
+                "object_lock_active": bool(payload_locked_objects),
+                "object_lock_summary": locked_object_summary(locked_objects),
+                "object_lock_blocked_reason": object_lock_blocked_reason,
+                "vision_warnings": warnings,
                 "approach_metrics": approach_metrics,
                 "axis_alignment": {
                     "current": current_alignment,

@@ -23,6 +23,8 @@ CONFIRM="${G1_HUMANEGO_CONFIRM:-}"
 MAX_STEPS="${G1_HUMANEGO_MAX_STEPS:-20}"
 TARGET_SOURCE="${G1_HUMANEGO_TARGET_SOURCE:-position_keep_orientation}"
 TARGET_ADAPTER="${G1_HUMANEGO_TARGET_ADAPTER:-full}"
+OBJECT_LOCK="${G1_HUMANEGO_OBJECT_LOCK:-none}"
+OBJECT_LOCK_REQUIRE_CLEAN="${G1_HUMANEGO_OBJECT_LOCK_REQUIRE_CLEAN:-true}"
 AXIS_STEP_M="${G1_HUMANEGO_AXIS_STEP_M:-0.01}"
 MAX_ORIENTATION_DEG="${G1_HUMANEGO_MAX_ORIENTATION_DEG:-10}"
 PROBE_AXIS="${G1_HUMANEGO_PROBE_AXIS:-z}"
@@ -62,6 +64,11 @@ if [[ -n "$GRIPPER_TARGET" ]]; then
   GRIPPER_TARGET_ARGS=(--gripper-target "$GRIPPER_TARGET")
 fi
 
+OBJECT_LOCK_CLEAN_ARG="--object-lock-require-clean"
+if [[ "$OBJECT_LOCK_REQUIRE_CLEAN" == "false" || "$OBJECT_LOCK_REQUIRE_CLEAN" == "0" ]]; then
+  OBJECT_LOCK_CLEAN_ARG="--no-object-lock-require-clean"
+fi
+
 python3 scripts/g1_humanego_interactive_step_client.py \
   --cfg "$CFG" \
   --server-url "$SERVER_URL" \
@@ -71,6 +78,8 @@ python3 scripts/g1_humanego_interactive_step_client.py \
   --max-steps "$MAX_STEPS" \
   --target-source "$TARGET_SOURCE" \
   --approach-object-key "$APPROACH_OBJECT_KEY" \
+  --object-lock "$OBJECT_LOCK" \
+  "$OBJECT_LOCK_CLEAN_ARG" \
   --target-adapter "$TARGET_ADAPTER" \
   --axis-step-m "$AXIS_STEP_M" \
   --max-orientation-deg "$MAX_ORIENTATION_DEG" \
