@@ -216,6 +216,57 @@ def locked_object_summary(locked_objects: dict[str, Any] | None) -> dict[str, An
     }
 
 
+def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+    gripper_result = step_record.get("gripper_result") or {}
+    gripper_before = (gripper_result.get("before") or {}).get("selected_raw")
+    gripper_after = (gripper_result.get("after") or {}).get("selected_raw")
+    post_ee_tracking = step_record.get("post_ee_translation_tracking") or {}
+    settled_tracking = step_record.get("settled_translation_tracking") or {}
+    approach = step_record.get("approach_metrics") or {}
+    post_ee_approach = step_record.get("post_ee_approach_metrics") or {}
+    observed_approach = step_record.get("observed_approach_metrics") or {}
+    axis = step_record.get("axis_alignment") or {}
+    return {
+        "idx": step_record.get("idx"),
+        "request_id": step_record.get("request_id"),
+        "operator_input": step_record.get("operator_input"),
+        "executed": step_record.get("executed"),
+        "server_ok": step_record.get("server_ok"),
+        "done_prob": (response.get("policy_preview") or {}).get("done_prob"),
+        "object_source_used": (response.get("input_summary") or {}).get("object_source_used"),
+        "object_lock_active": step_record.get("object_lock_active"),
+        "vision_warnings": step_record.get("vision_warnings"),
+        "target_delta_m": step_record.get("target_delta_m"),
+        "target_delta_norm_m": step_record.get("target_delta_norm_m"),
+        "target_rotation_delta_deg": step_record.get("target_rotation_delta_deg"),
+        "server_raw_delta_norm_m": (((response.get("policy_preview") or {}).get("sides") or {}).get("right") or [{}])[0].get("safety_translation_limit", {}).get("raw_delta_norm_m"),
+        "server_clipped": (((response.get("policy_preview") or {}).get("sides") or {}).get("right") or [{}])[0].get("safety_translation_limit", {}).get("clipped"),
+        "post_ee_delta_m": step_record.get("post_ee_delta_m"),
+        "post_ee_delta_norm_m": step_record.get("post_ee_delta_norm_m"),
+        "post_ee_rotation_delta_deg": step_record.get("post_ee_rotation_delta_deg"),
+        "post_ee_cos_to_target": post_ee_tracking.get("cosine_to_target_delta"),
+        "settled_delta_m": step_record.get("settled_delta_m"),
+        "settled_delta_norm_m": step_record.get("settled_delta_norm_m"),
+        "settled_rotation_delta_deg": step_record.get("observed_rotation_delta_deg"),
+        "settled_cos_to_target": settled_tracking.get("cosine_to_target_delta"),
+        "distance_before_m": approach.get("before_link7_to_object_m"),
+        "distance_target_m": approach.get("target_link7_to_object_m"),
+        "distance_target_delta_m": approach.get("target_minus_before_m"),
+        "distance_post_ee_m": post_ee_approach.get("post_ee_link7_to_object_m"),
+        "distance_post_ee_delta_m": post_ee_approach.get("post_ee_minus_before_m"),
+        "distance_after_m": observed_approach.get("after_link7_to_object_m"),
+        "distance_after_delta_m": observed_approach.get("after_minus_before_m"),
+        "gripper_target_0_open_1_closed": (step_record.get("gripper_command") or {}).get("command_0_open_1_closed"),
+        "gripper_before_raw": gripper_before,
+        "gripper_after_raw": gripper_after,
+        "gripper_delta_raw": gripper_result.get("observed_delta_raw"),
+        "tcp_current_best_axis": (axis.get("current") or {}).get("best_axis"),
+        "tcp_current_angle_deg": (axis.get("current") or {}).get("best_angle_to_object_deg"),
+        "tcp_target_best_axis": (axis.get("target") or {}).get("best_axis"),
+        "tcp_target_angle_deg": (axis.get("target") or {}).get("best_angle_to_object_deg"),
+    }
+
+
 def select_target(
     step_preview: dict[str, Any],
     source: str,
@@ -781,6 +832,9 @@ def main() -> int:
     arm = None
     locked_objects: dict[str, Any] | None = None
     object_lock_blocked_reason = None
+    step_summaries: list[dict[str, Any]] = []
+    step_summaries_path = run_dir / "step_summaries.json"
+    step_summaries_jsonl_path = run_dir / "step_summaries.jsonl"
     try:
         from G1Camera import G1HeadRGBDCamera
         from G1RobotArm import G1RobotArmReadOnly
@@ -983,17 +1037,32 @@ def main() -> int:
             if operator == "q":
                 log("operator requested quit")
                 step_record["executed"] = False
+                summary = compact_step_summary(step_record, response)
+                step_summaries.append(summary)
+                step_summaries_path.write_text(json.dumps(json_safe(step_summaries), ensure_ascii=False, indent=2), encoding="utf-8")
+                with step_summaries_jsonl_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(json_safe(summary), ensure_ascii=False) + "\n")
                 report["steps"].append(step_record)
                 break
             if operator == "s":
                 log("operator skipped this target")
                 step_record["executed"] = False
+                summary = compact_step_summary(step_record, response)
+                step_summaries.append(summary)
+                step_summaries_path.write_text(json.dumps(json_safe(step_summaries), ensure_ascii=False, indent=2), encoding="utf-8")
+                with step_summaries_jsonl_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(json_safe(summary), ensure_ascii=False) + "\n")
                 report["steps"].append(step_record)
                 continue
             if args.confirm_control != "RUN_CONTROL":
                 log("refusing to execute because --confirm-control RUN_CONTROL is missing")
                 step_record["executed"] = False
                 step_record["blocked_reason"] = "missing RUN_CONTROL confirmation"
+                summary = compact_step_summary(step_record, response)
+                step_summaries.append(summary)
+                step_summaries_path.write_text(json.dumps(json_safe(step_summaries), ensure_ascii=False, indent=2), encoding="utf-8")
+                with step_summaries_jsonl_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(json_safe(summary), ensure_ascii=False) + "\n")
                 report["steps"].append(step_record)
                 break
 
@@ -1126,6 +1195,14 @@ def main() -> int:
                     f"delta={step_record['observed_approach_metrics']['after_minus_before_m']:+.4f}m"
                 )
             report["steps"].append(step_record)
+            summary = compact_step_summary(step_record, response)
+            step_summaries.append(summary)
+            step_summaries_path.write_text(
+                json.dumps(json_safe(step_summaries), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            with step_summaries_jsonl_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(json_safe(summary), ensure_ascii=False) + "\n")
             (step_dir / "step_record.json").write_text(
                 json.dumps(json_safe(step_record), ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -1153,6 +1230,10 @@ def main() -> int:
         json.dumps(json_safe(report), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    step_summaries_path.write_text(
+        json.dumps(json_safe(step_summaries), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     log("building local result zip")
     zip_path = make_zip(run_dir)
     upload = None
@@ -1166,7 +1247,19 @@ def main() -> int:
         (run_dir / "upload_result.json").write_text(json.dumps(upload, ensure_ascii=False, indent=2), encoding="utf-8")
         zip_path = make_zip(run_dir)
 
-    print(json.dumps({"run_dir": str(run_dir), "zip_path": str(zip_path), "upload": upload}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "run_dir": str(run_dir),
+                "zip_path": str(zip_path),
+                "step_summaries_path": str(step_summaries_path),
+                "step_summaries_jsonl_path": str(step_summaries_jsonl_path),
+                "upload": upload,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0 if report.get("ok") else 2
 
 
