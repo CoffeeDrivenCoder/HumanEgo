@@ -42,6 +42,36 @@ perception:
   object_prompts:
     obj1: "a bread ."
     obj2: "a white plate ."
+  object_filters:
+    obj2:
+      # Plate is thin and compact. Use individual DINO/SAM candidates instead
+      # of the union mask, then reject table-sized or arm-connected masks.
+      use_dinosam_candidates: true
+      min_mask_pixels: 120
+      max_mask_pixels: 9000
+      target_mask_pixels: 1800
+      min_bbox_wh: [10, 10]
+      max_bbox_wh: [140, 120]
+      min_bbox_aspect: 0.45
+      max_bbox_aspect: 2.40
+      max_bbox_area_frac: 0.16
+      min_fill_ratio: 0.12
+      min_circularity: 0.04
+      plate_circle_fallback: true
+      plate_circle_min_radius_px: 14
+      plate_circle_max_radius_px: 45
+      plate_circle_target_radius_px: 27
+      plate_circle_param1: 80
+      plate_circle_param2: 16
+      plate_circle_min_edge_support: 0.015
+      plate_circle_min_disk_overlap: 0.20
+      plate_circle_min_score: 0.05
+      plate_circle_mask_scale: 1.08
+      max_raw_mask_pixels: 9000
+      min_valid_depth_pixels: 80
+      min_valid_depth_ratio: 0.75
+      max_depth_range_m: 0.30
+      max_extent_m: [0.35, 0.35, 0.25]
   min_points: 30
   mask_erode_px: 0
   depth_window_px: 4

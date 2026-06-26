@@ -12,7 +12,8 @@ PORT="${G1_HUMANEGO_SERVER_PORT:-50051}"
 CFG="${G1_HUMANEGO_CFG:-cfg/inference/g1_serve_bread_right.yaml}"
 DEVICE="${G1_HUMANEGO_DEVICE:-auto}"
 OBJECT_SOURCE="${G1_HUMANEGO_OBJECT_SOURCE:-}"
-OUT_DIR="${G1_HUMANEGO_SERVER_OUT_DIR:-./g1_humanego_server_runs}"
+SESSION="${G1_ARTIFACT_SESSION:-$(date -u +%Y%m%d)}"
+OUT_DIR="${G1_HUMANEGO_SERVER_OUT_DIR:-./artifacts/g1_humanego/${SESSION}/server}"
 RESTART="${G1_HUMANEGO_RESTART:-0}"
 
 port_is_busy() {

@@ -235,6 +235,72 @@ class DINOSAM:
         mask_out = mask if mask is not None else np.zeros(image_np.shape[:2], dtype=np.uint8)
         if save_path: cv2.imwrite(save_path, mask_out)
         return mask_out
+
+    def process_single_candidates(self, img, prompt):
+        """Return individual DINO-box/SAM mask candidates for one prompt.
+
+        process_single() returns the union of all SAM masks. That is useful for
+        offline preprocessing, but online RGB-D pose estimation needs the
+        separate candidates so it can reject a table-sized mask and keep a
+        compact object-like one.
+        """
+        if isinstance(img, str):
+            image_np = cv2.imread(img)
+        else:
+            image_np = img
+
+        if image_np is None:
+            return []
+
+        self.engine.predictor.set_image(image_np)
+        image_pil = Image.fromarray(cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB))
+        W, H = image_pil.size
+        inputs = self.engine.processor(images=image_pil, text=prompt, return_tensors="pt").to(self.engine.device)
+        t_start = time.perf_counter()
+        with torch.no_grad():
+            outputs = self.engine.dino_model(**inputs)
+
+        logits = outputs.logits.sigmoid()[0]
+        boxes = outputs.pred_boxes[0]
+        mask_filter = logits.max(-1)[0] > self.cfg.box_threshold
+        filtered_logits = logits[mask_filter]
+        filtered_boxes = boxes[mask_filter]
+        if len(filtered_boxes) == 0:
+            return []
+
+        confidences = filtered_logits.max(-1)[0].detach().cpu().numpy()
+        pixel_boxes = filtered_boxes * torch.Tensor([W, H, W, H]).to(self.engine.device)
+        cx, cy, w, h = pixel_boxes.unbind(-1)
+        x1, y1 = cx - 0.5 * w, cy - 0.5 * h
+        x2, y2 = cx + 0.5 * w, cy + 0.5 * h
+        input_boxes = torch.stack([x1, y1, x2, y2], dim=-1).detach().cpu().numpy()
+
+        masks, scores, _ = self.engine.predictor.predict(box=input_boxes, multimask_output=False)
+        if self.engine.device == "cuda":
+            torch.cuda.synchronize()
+        latency = time.perf_counter() - t_start
+
+        masks_arr = np.asarray(masks)
+        if masks_arr.ndim == 2:
+            masks_arr = masks_arr[None, :, :]
+        elif masks_arr.ndim == 4:
+            masks_arr = masks_arr[:, 0, :, :]
+        elif masks_arr.ndim != 3:
+            masks_arr = masks_arr.reshape((-1, H, W))
+
+        scores_arr = np.asarray(scores).reshape(-1) if scores is not None else np.zeros(len(masks_arr), dtype=np.float32)
+        candidates = []
+        for idx, mask in enumerate(masks_arr):
+            candidates.append(
+                {
+                    "mask": (mask > 0).astype(np.uint8) * 255,
+                    "box_xyxy": input_boxes[idx].astype(float).tolist(),
+                    "box_confidence": float(confidences[idx]) if idx < len(confidences) else None,
+                    "sam_score": float(scores_arr[idx]) if idx < len(scores_arr) else None,
+                    "latency_s": float(latency),
+                }
+            )
+        return candidates
     
 
     def process_and_save(self, image_path, prompts_dict):

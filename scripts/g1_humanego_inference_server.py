@@ -46,9 +46,11 @@ from g1_humanego_dry_run import (  # noqa: E402
 from interfaces import ObjectState  # noqa: E402
 from interfaces import Frame  # noqa: E402
 from policy import ICTPolicy  # noqa: E402
+from g1_artifacts import artifact_dir  # noqa: E402
 
 
 DEFAULT_CFG = PROJECT_ROOT / "cfg" / "inference" / "g1_serve_bread_right.yaml"
+DEFAULT_OUT_DIR = artifact_dir("server")
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -113,6 +115,11 @@ def read_matrix(mapping: dict[str, Any], key: str) -> np.ndarray:
     return np.asarray(mapping[key], dtype=np.float64).reshape(4, 4)
 
 
+def safe_request_id(value: Any) -> str:
+    request_id = str(value or utc_stamp())
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in request_id)
+
+
 @dataclass
 class InferenceRuntime:
     cfg_path: Path
@@ -145,6 +152,9 @@ class InferenceRuntime:
 
     def infer(self, payload: dict[str, Any]) -> dict[str, Any]:
         started = time.time()
+        safe_id = safe_request_id(payload.get("request_id"))
+        run_dir = self.out_dir / safe_id
+        run_dir.mkdir(parents=True, exist_ok=True)
         rgb_bgr = decode_rgb_jpeg(payload)
         depth_m, depth_info = decode_depth_npz(payload)
         h, w = rgb_bgr.shape[:2]
@@ -160,6 +170,7 @@ class InferenceRuntime:
 
         object_source_used = "payload"
         object_error = None
+        object_debug = None
         objects = objects_from_payload(payload)
         if objects is None and self.object_source == "rgbd":
             object_source_used = "rgbd"
@@ -168,7 +179,10 @@ class InferenceRuntime:
                     raise ValueError("object_source=rgbd requires depth_m_npz_b64 from client")
                 assert self.object_pose_estimator is not None
                 frame = Frame(rgb=rgb_bgr, depth_m=depth_m.astype(np.float32), K=K.astype(np.float32))
-                objects = self.object_pose_estimator.estimate([frame])
+                objects, object_debug = self.object_pose_estimator.estimate_with_debug(
+                    [frame],
+                    debug_dir=run_dir / "object_debug",
+                )
             except Exception as exc:
                 object_error = {
                     "error_type": type(exc).__name__,
@@ -235,17 +249,21 @@ class InferenceRuntime:
                 },
                 "object_source_used": object_source_used,
                 "object_error": object_error,
+                "object_debug": object_debug,
             },
             "policy_preview": preview,
             "latency_s": time.time() - started,
         }
-        self._log_request(payload, response, rgb_bgr)
+        self._log_request(payload, response, rgb_bgr, run_dir=run_dir)
         return response
 
-    def _log_request(self, payload: dict[str, Any], response: dict[str, Any], rgb_bgr: np.ndarray) -> None:
-        request_id = str(payload.get("request_id") or utc_stamp())
-        safe_id = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in request_id)
-        run_dir = self.out_dir / safe_id
+    def _log_request(
+        self,
+        payload: dict[str, Any],
+        response: dict[str, Any],
+        rgb_bgr: np.ndarray,
+        run_dir: Path,
+    ) -> None:
         run_dir.mkdir(parents=True, exist_ok=True)
         summary = dict(payload)
         summary.pop("rgb_jpeg_b64", None)
@@ -325,7 +343,7 @@ def main() -> int:
     parser.add_argument("--cfg", default=str(DEFAULT_CFG))
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--object-source", default="", choices=["", "fixed", "rgbd"])
-    parser.add_argument("--out-dir", default=str(PROJECT_ROOT / "g1_humanego_server_runs"))
+    parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--save-rgb", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 

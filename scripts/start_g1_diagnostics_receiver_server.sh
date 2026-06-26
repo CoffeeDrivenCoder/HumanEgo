@@ -7,8 +7,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+SESSION="${G1_ARTIFACT_SESSION:-$(date -u +%Y%m%d)}"
+
 python3 scripts/g1_diagnostics_receiver.py \
   --host 0.0.0.0 \
   --port "${G1_DIAG_RECEIVER_PORT:-8000}" \
-  --out-dir "${G1_DIAG_OUT_DIR:-./g1_diagnostics_uploads}" \
+  --out-dir "${G1_DIAG_OUT_DIR:-./artifacts/g1_humanego/${SESSION}/diagnostics/uploads}" \
   --unpack

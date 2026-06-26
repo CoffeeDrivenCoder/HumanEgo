@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import struct
 import sys
 import tempfile
@@ -50,6 +51,7 @@ from render_g1_gripper_mesh_on_serve_bread import (  # noqa: E402
 
 
 DEFAULT_OUT = PROJECT_ROOT / "outputs" / "render_g1_arm_mesh" / "g1_right_arm_006_tcp_pz_full.mp4"
+T_OPENGL_CAMERA_FROM_OPENCV = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float64)
 
 
 @dataclass
@@ -63,6 +65,15 @@ class FbxNode:
 class ArmState:
     q: np.ndarray | None = None
     base_pos_cam: np.ndarray | None = None
+
+
+@dataclass
+class GpuRenderer:
+    pyrender: object
+    trimesh: object
+    renderer: object
+    width: int
+    height: int
 
 
 ARM_LINK_NAMES = [
@@ -275,6 +286,46 @@ def load_arm_meshes(asset_root: Path, max_faces_per_link: int) -> dict[str, Rend
     return meshes
 
 
+def build_cylinder_mesh(
+    radius: float,
+    length: float,
+    z0: float,
+    color_bgr: tuple[int, int, int],
+    segments: int = 48,
+    radius_end: float | None = None,
+) -> RenderMesh:
+    if radius_end is None:
+        radius_end = radius
+    angles = np.linspace(0.0, 2.0 * math.pi, segments, endpoint=False)
+    circle0 = np.column_stack([radius * np.cos(angles), radius * np.sin(angles)])
+    circle1 = np.column_stack([radius_end * np.cos(angles), radius_end * np.sin(angles)])
+    z_vals = np.asarray([z0, z0 + length], dtype=np.float64)
+    vertices = []
+    for z, circle in zip(z_vals, [circle0, circle1]):
+        vertices.extend([[x, y, z] for x, y in circle])
+    vertices.append([0.0, 0.0, z0])
+    vertices.append([0.0, 0.0, z0 + length])
+    vertices = np.asarray(vertices, dtype=np.float64)
+
+    faces: list[list[int]] = []
+    bottom_center = 2 * segments
+    top_center = 2 * segments + 1
+    for i in range(segments):
+        j = (i + 1) % segments
+        b0, b1 = i, j
+        t0, t1 = i + segments, j + segments
+        faces.append([b0, b1, t1])
+        faces.append([b0, t1, t0])
+        faces.append([bottom_center, b1, b0])
+        faces.append([top_center, t0, t1])
+    faces_arr = np.asarray(faces, dtype=np.int32)
+    return RenderMesh(
+        vertices_link=vertices,
+        faces=faces_arr,
+        face_colors_bgr=np.tile(np.asarray(color_bgr, dtype=np.uint8), (len(faces_arr), 1)),
+    )
+
+
 def arm_fk(q: np.ndarray) -> dict[str, np.ndarray]:
     T = np.eye(4, dtype=np.float64)
     out = {"arm_r_base_link": T.copy()}
@@ -376,6 +427,7 @@ def solve_arm_ik(T_tcp_target_base: np.ndarray, seed_q: np.ndarray | None, max_n
 def combine_meshes(
     link_meshes: dict[str, RenderMesh],
     gripper_mesh: RenderMesh,
+    adapter_mesh: RenderMesh | None,
     T_base_world: np.ndarray,
     link_T_base: dict[str, np.ndarray],
     visible_links: set[str],
@@ -396,6 +448,14 @@ def combine_meshes(
         colors_all.append(mesh.face_colors_bgr)
         offset += len(mesh.vertices_link)
 
+    if adapter_mesh is not None:
+        vertices_h = np.column_stack([adapter_mesh.vertices_link, np.ones(len(adapter_mesh.vertices_link))])
+        vertices_world = (T_base_world @ link_T_base["gripper_r_base_link"] @ vertices_h.T).T[:, :3]
+        vertices_world_all.append(vertices_world)
+        faces_all.append(adapter_mesh.faces + offset)
+        colors_all.append(adapter_mesh.face_colors_bgr)
+        offset += len(adapter_mesh.vertices_link)
+
     vertices_h = np.column_stack([gripper_mesh.vertices_link, np.ones(len(gripper_mesh.vertices_link))])
     vertices_world = (T_base_world @ link_T_base["gripper_r_base_link"] @ vertices_h.T).T[:, :3]
     vertices_world_all.append(vertices_world)
@@ -409,12 +469,77 @@ def combine_meshes(
     return mesh, vertices_world_cat
 
 
+def init_gpu_renderer(width: int, height: int) -> GpuRenderer:
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    import pyrender
+    import trimesh
+
+    renderer = pyrender.OffscreenRenderer(viewport_width=width, viewport_height=height)
+    return GpuRenderer(pyrender=pyrender, trimesh=trimesh, renderer=renderer, width=width, height=height)
+
+
+def render_mesh_gpu(
+    background_bgr: np.ndarray,
+    mesh: RenderMesh,
+    vertices_world: np.ndarray,
+    K: np.ndarray,
+    c2w: np.ndarray,
+    gpu: GpuRenderer,
+    alpha: float,
+) -> np.ndarray:
+    pyrender = gpu.pyrender
+    trimesh = gpu.trimesh
+    h, w = background_bgr.shape[:2]
+    if gpu.width != w or gpu.height != h:
+        gpu.renderer.delete()
+        new_gpu = init_gpu_renderer(w, h)
+        gpu.pyrender = new_gpu.pyrender
+        gpu.trimesh = new_gpu.trimesh
+        gpu.renderer = new_gpu.renderer
+        gpu.width = new_gpu.width
+        gpu.height = new_gpu.height
+
+    vertices_h = np.column_stack([vertices_world, np.ones(len(vertices_world))])
+    vertices_cam_cv = (np.linalg.inv(c2w) @ vertices_h.T).T
+    vertices_cam_gl = (T_OPENGL_CAMERA_FROM_OPENCV @ vertices_cam_cv.T).T[:, :3]
+
+    scene = pyrender.Scene(bg_color=[0.0, 0.0, 0.0, 0.0], ambient_light=[0.46, 0.46, 0.46])
+    tri = trimesh.Trimesh(vertices=vertices_cam_gl, faces=mesh.faces, process=False)
+    material = pyrender.MetallicRoughnessMaterial(
+        metallicFactor=0.18,
+        roughnessFactor=0.72,
+        baseColorFactor=(0.54, 0.56, 0.56, float(np.clip(alpha, 0.0, 1.0))),
+    )
+    scene.add(pyrender.Mesh.from_trimesh(tri, material=material, smooth=True), pose=np.eye(4))
+    fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
+    scene.add(pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy, znear=0.02, zfar=3.0), pose=np.eye(4))
+
+    light_pose = np.eye(4)
+    light_pose[:3, 3] = [0.2, 0.6, 0.8]
+    scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=2.1), pose=light_pose)
+    light_pose2 = np.eye(4)
+    light_pose2[:3, 3] = [-0.6, -0.2, 0.8]
+    scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=0.9), pose=light_pose2)
+
+    color_rgba, depth = gpu.renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+    fg_bgr = color_rgba[..., :3][..., ::-1].astype(np.float32)
+    mask = depth > 0
+    out = background_bgr.astype(np.float32).copy()
+    if np.any(mask):
+        # Pyrender returns alpha 255 for covered pixels with this material; use
+        # the user alpha for compositing so painter/gpu outputs have comparable opacity.
+        out[mask] = alpha * fg_bgr[mask] + (1.0 - alpha) * out[mask]
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def render_frame(
     frame: FrameInputs,
     link_meshes: dict[str, RenderMesh],
     gripper_meshes: dict[str, RenderMesh],
+    adapter_mesh: RenderMesh | None,
     state: ArmState,
     args: argparse.Namespace,
+    gpu: GpuRenderer | None = None,
 ) -> np.ndarray:
     T_tcp_world, grasp = T_tcp_world_from_training(frame.training)
     if T_tcp_world is None:
@@ -431,7 +556,18 @@ def render_frame(
     state.q = q
     link_T_base = arm_fk(q)
     gripper_mesh = gripper_meshes["closed"] if grasp and grasp > 0.5 else gripper_meshes["open"]
-    mesh, vertices_world = combine_meshes(link_meshes, gripper_mesh, T_base_world, link_T_base, args.visible_link_names)
+    mesh, vertices_world = combine_meshes(
+        link_meshes,
+        gripper_mesh,
+        adapter_mesh,
+        T_base_world,
+        link_T_base,
+        args.visible_link_names,
+    )
+    if args.renderer == "gpu":
+        if gpu is None:
+            raise RuntimeError("GPU renderer requested but not initialized")
+        return render_mesh_gpu(frame.background_bgr, mesh, vertices_world, K, c2w, gpu, args.overlay_alpha)
     return rasterize_mesh_painter(frame.background_bgr, mesh, vertices_world, K, c2w, args.overlay_alpha)
 
 
@@ -451,10 +587,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--inpaint-radius", type=float, default=5.0)
     parser.add_argument("--mask-dilate", type=int, default=5)
     parser.add_argument("--overlay-alpha", type=float, default=0.96)
+    parser.add_argument("--renderer", choices=["painter", "gpu"], default="painter")
     parser.add_argument("--max-arm-faces-per-link", type=int, default=3000)
     parser.add_argument("--max-gripper-faces", type=int, default=12000)
     parser.add_argument("--ik-max-nfev", type=int, default=45)
     parser.add_argument("--base-smooth", type=float, default=0.85)
+    parser.add_argument("--wrist-adapter", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--wrist-adapter-radius", type=float, default=0.032)
+    parser.add_argument("--wrist-adapter-radius-end", type=float, default=0.024)
+    parser.add_argument("--wrist-adapter-length", type=float, default=0.155)
+    parser.add_argument("--wrist-adapter-z0", type=float, default=-0.160)
     parser.add_argument(
         "--visible-links",
         default="arm_r_link4,arm_r_link5,arm_r_link6,arm_r_end_link",
@@ -485,6 +627,15 @@ def main() -> int:
         "open": decimate_mesh_faces(build_gripper_mesh(asset_root, grasp=0.0), args.max_gripper_faces),
         "closed": decimate_mesh_faces(build_gripper_mesh(asset_root, grasp=1.0), args.max_gripper_faces),
     }
+    adapter_mesh = None
+    if args.wrist_adapter:
+        adapter_mesh = build_cylinder_mesh(
+            radius=args.wrist_adapter_radius,
+            length=args.wrist_adapter_length,
+            z0=args.wrist_adapter_z0,
+            color_bgr=(118, 126, 130),
+            radius_end=args.wrist_adapter_radius_end,
+        )
 
     frame_dirs = select_frame_dirs(
         find_rgb_frame_dirs(args.mps_path),
@@ -497,6 +648,7 @@ def main() -> int:
         raise RuntimeError("No frames selected.")
 
     writer: cv2.VideoWriter | None = None
+    gpu: GpuRenderer | None = None
     state = ArmState()
     written = 0
     skipped = 0
@@ -505,7 +657,10 @@ def main() -> int:
         if frame is None:
             skipped += 1
             continue
-        rendered = render_frame(frame, link_meshes, gripper_meshes, state, args)
+        if args.renderer == "gpu" and gpu is None:
+            h0, w0 = frame.background_bgr.shape[:2]
+            gpu = init_gpu_renderer(w0, h0)
+        rendered = render_frame(frame, link_meshes, gripper_meshes, adapter_mesh, state, args, gpu)
         if writer is None:
             h, w = rendered.shape[:2]
             writer = make_writer(args.out, args.fps, (w, h))
@@ -517,6 +672,8 @@ def main() -> int:
 
     if writer is not None:
         writer.release()
+    if gpu is not None:
+        gpu.renderer.delete()
 
     report = {
         "mps_path": str(args.mps_path),
@@ -527,7 +684,7 @@ def main() -> int:
         "fps": args.fps,
         "background": args.background,
         "renderer": "G1 right-arm FBX visual meshes + real Omnipicker DAE gripper, tcp +Z / pz convention",
-        "note": "Software painter renderer; FBX meshes are parsed directly from the official G1 package.",
+        "note": f"{args.renderer} renderer; FBX meshes are parsed directly from the official G1 package.",
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0

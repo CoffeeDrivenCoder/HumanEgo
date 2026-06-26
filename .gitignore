@@ -3,5 +3,14 @@ __pycache__/
 .DS_Store
 
 # Generated local artifacts.
+artifacts/
 outputs/
 g1_diagnostics_uploads/
+g1_diagnostics_runs/
+g1_ee_control_verify_runs/
+g1_humanego_client_runs/
+g1_humanego_dry_run_runs/
+g1_humanego_interactive_runs/
+g1_humanego_server_runs/
+g1_robotarm_readonly_runs/
+g1_transform_verify_runs/

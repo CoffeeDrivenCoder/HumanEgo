@@ -11,7 +11,9 @@ if [ -f "a2d_sdk/env.sh" ]; then
   source a2d_sdk/env.sh || echo "[WARN] failed to source a2d_sdk/env.sh; continuing with current environment" >&2
 fi
 
-UPLOAD_URL="${G1_DIAG_UPLOAD_URL:-http://111.0.22.33:30002/upload}"
+SESSION="${G1_ARTIFACT_SESSION:-$(date -u +%Y%m%d)}"
+OUT_DIR="${G1_HUMANEGO_DRY_RUN_OUT_DIR:-./artifacts/g1_humanego/${SESSION}/client_local_model}"
+UPLOAD_URL="${G1_HUMANEGO_UPLOAD_URL:-${G1_DIAG_UPLOAD_URL:-}}"
 TAG="${G1_HUMANEGO_TAG:-humanego_dry_run}"
 CFG="${G1_HUMANEGO_CFG:-cfg/inference/g1_serve_bread_right.yaml}"
 STEPS="${G1_HUMANEGO_STEPS:-1}"
@@ -22,6 +24,7 @@ PYTHON_BIN="${G1_HUMANEGO_PYTHON:-python3}"
 
 "$PYTHON_BIN" scripts/g1_humanego_dry_run.py \
   --cfg "$CFG" \
+  --out-dir "$OUT_DIR" \
   --tag "$TAG" \
   --steps "$STEPS" \
   --device "$DEVICE" \

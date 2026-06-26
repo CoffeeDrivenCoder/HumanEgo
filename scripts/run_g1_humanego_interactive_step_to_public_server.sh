@@ -15,6 +15,8 @@ SERVER_URL="${G1_HUMANEGO_SERVER_URL:-http://111.0.22.33:30003/infer}"
 # Interactive control should not wait on diagnostics upload by default.
 # Set G1_HUMANEGO_UPLOAD_URL or pass --upload-url to upload the saved zip.
 UPLOAD_URL="${G1_HUMANEGO_UPLOAD_URL:-${G1_DIAG_UPLOAD_URL:-}}"
+SESSION="${G1_ARTIFACT_SESSION:-$(date -u +%Y%m%d)}"
+OUT_DIR="${G1_HUMANEGO_INTERACTIVE_OUT_DIR:-./artifacts/g1_humanego/${SESSION}/interactive}"
 TAG="${G1_HUMANEGO_TAG:-interactive_step}"
 CFG="${G1_HUMANEGO_CFG:-cfg/inference/g1_serve_bread_right.yaml}"
 CONFIRM="${G1_HUMANEGO_CONFIRM:-}"
@@ -47,6 +49,7 @@ fi
 python3 scripts/g1_humanego_interactive_step_client.py \
   --cfg "$CFG" \
   --server-url "$SERVER_URL" \
+  --out-dir "$OUT_DIR" \
   --tag "$TAG" \
   --confirm-control "$CONFIRM" \
   --max-steps "$MAX_STEPS" \

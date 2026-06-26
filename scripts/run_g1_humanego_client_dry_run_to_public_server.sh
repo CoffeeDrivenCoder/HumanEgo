@@ -12,7 +12,11 @@ if [ -f "a2d_sdk/env.sh" ]; then
 fi
 
 SERVER_URL="${G1_HUMANEGO_SERVER_URL:-http://111.0.22.33:30003/infer}"
-UPLOAD_URL="${G1_DIAG_UPLOAD_URL:-http://111.0.22.33:30002/upload}"
+SESSION="${G1_ARTIFACT_SESSION:-$(date -u +%Y%m%d)}"
+OUT_DIR="${G1_HUMANEGO_CLIENT_OUT_DIR:-./artifacts/g1_humanego/${SESSION}/client}"
+# Dry-run should not depend on diagnostics upload. Set G1_HUMANEGO_UPLOAD_URL
+# or G1_DIAG_UPLOAD_URL only when an upload receiver is running.
+UPLOAD_URL="${G1_HUMANEGO_UPLOAD_URL:-${G1_DIAG_UPLOAD_URL:-}}"
 TAG="${G1_HUMANEGO_TAG:-client_dry_run}"
 CFG="${G1_HUMANEGO_CFG:-cfg/inference/g1_serve_bread_right.yaml}"
 STEPS="${G1_HUMANEGO_STEPS:-1}"
@@ -51,6 +55,7 @@ fi
 python3 scripts/g1_humanego_client_dry_run.py \
   --cfg "$CFG" \
   --server-url "$SERVER_URL" \
+  --out-dir "$OUT_DIR" \
   --tag "$TAG" \
   --steps "$STEPS" \
   --preview-steps "$PREVIEW_STEPS" \

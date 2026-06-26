@@ -51,6 +51,7 @@ from g1_humanego_client_dry_run import (  # noqa: E402
     upload_zip,
 )
 from g1_humanego_dry_run import pose_dict_from_T  # noqa: E402
+from g1_artifacts import artifact_dir, run_dir as artifact_run_dir  # noqa: E402
 
 
 EPS = 1e-12
@@ -511,7 +512,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cfg", default=str(DEFAULT_CFG))
     parser.add_argument("--server-url", default="http://111.0.22.33:30003/infer")
-    parser.add_argument("--out-dir", default=str(PROJECT_ROOT / "g1_humanego_interactive_runs"))
+    parser.add_argument("--out-dir", default=str(artifact_dir("interactive")))
     parser.add_argument("--tag", default="interactive_step")
     parser.add_argument("--side", choices=["right", "left"], default="right")
     parser.add_argument("--max-steps", type=int, default=20)
@@ -554,7 +555,12 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     cfg_path = resolve_project_path(args.cfg)
     cfg = load_cfg(cfg_path)
-    run_dir = Path(args.out_dir).expanduser().resolve() / f"g1_humanego_interactive_{utc_stamp()}_{args.tag}"
+    out_base = Path(args.out_dir).expanduser().resolve()
+    default_base = artifact_dir("interactive")
+    if out_base == default_base:
+        run_dir = artifact_run_dir("interactive", args.tag, prefix="interactive")
+    else:
+        run_dir = out_base / f"g1_humanego_interactive_{utc_stamp()}_{args.tag}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     report: Dict[str, Any] = {
