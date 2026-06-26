@@ -349,6 +349,25 @@ def compact_alignment(label: str, alignment: dict[str, Any], improvement: dict[s
     return text
 
 
+def translation_tracking_report(target_delta: np.ndarray, observed_delta: np.ndarray) -> dict[str, Any]:
+    target_delta = np.asarray(target_delta, dtype=np.float64).reshape(3)
+    observed_delta = np.asarray(observed_delta, dtype=np.float64).reshape(3)
+    target_norm = float(np.linalg.norm(target_delta))
+    observed_norm = float(np.linalg.norm(observed_delta))
+    out: dict[str, Any] = {
+        "target_delta_m": target_delta.tolist(),
+        "observed_delta_m": observed_delta.tolist(),
+        "target_norm_m": target_norm,
+        "observed_norm_m": observed_norm,
+        "error_m": (observed_delta - target_delta).tolist(),
+        "error_norm_m": float(np.linalg.norm(observed_delta - target_delta)),
+    }
+    if target_norm > EPS and observed_norm > EPS:
+        cosine = float(np.dot(target_delta, observed_delta) / (target_norm * observed_norm))
+        out["cosine_to_target_delta"] = float(np.clip(cosine, -1.0, 1.0))
+    return out
+
+
 def adapt_target_pose(
     target_pose: dict[str, float],
     before_T_link7: np.ndarray,
@@ -897,6 +916,31 @@ def main() -> int:
             step_record["executed"] = bool(control_result.get("ok"))
             step_record["control_result"] = control_result
 
+            post_ee_T_link7 = arm.get_T_link7_in_base()
+            post_ee_delta = post_ee_T_link7[:3, 3] - before_T_link7[:3, 3]
+            step_record["post_ee_T_link7_in_base"] = post_ee_T_link7.tolist()
+            step_record["post_ee_delta_m"] = post_ee_delta.tolist()
+            step_record["post_ee_delta_norm_m"] = float(np.linalg.norm(post_ee_delta))
+            step_record["post_ee_rotation_delta_deg"] = rotation_angle_deg(
+                post_ee_T_link7[:3, :3] @ before_T_link7[:3, :3].T
+            )
+            step_record["post_ee_translation_tracking"] = translation_tracking_report(target_delta, post_ee_delta)
+            if object_base is not None:
+                post_ee_dist = float(np.linalg.norm(post_ee_T_link7[:3, 3] - object_base))
+                step_record["post_ee_approach_metrics"] = {
+                    "object_key": args.approach_object_key,
+                    "before_link7_to_object_m": approach_metrics["before_link7_to_object_m"] if approach_metrics else None,
+                    "post_ee_link7_to_object_m": post_ee_dist,
+                    "post_ee_minus_before_m": post_ee_dist - (approach_metrics["before_link7_to_object_m"] if approach_metrics else post_ee_dist),
+                    "closer": bool(approach_metrics and post_ee_dist < approach_metrics["before_link7_to_object_m"]),
+                }
+            log(
+                f"step {idx}: post_ee_delta={post_ee_delta.tolist()} "
+                f"norm={np.linalg.norm(post_ee_delta):.4f} "
+                f"rot_deg={step_record['post_ee_rotation_delta_deg']:.2f} "
+                f"cos_to_target={step_record['post_ee_translation_tracking'].get('cosine_to_target_delta')}"
+            )
+
             gripper_result = None
             if args.execute_gripper:
                 log(
@@ -913,9 +957,27 @@ def main() -> int:
                 before_raw = float(gripper_result["before"]["selected_raw"])
                 after_raw = float(gripper_result["after"]["selected_raw"])
                 gripper_result["observed_delta_raw"] = after_raw - before_raw
+                post_gripper_T_link7 = arm.get_T_link7_in_base()
+                post_gripper_delta = post_gripper_T_link7[:3, 3] - before_T_link7[:3, 3]
+                gripper_result["post_gripper_T_link7_in_base"] = post_gripper_T_link7.tolist()
+                gripper_result["post_gripper_arm_delta_m"] = post_gripper_delta.tolist()
+                gripper_result["post_gripper_arm_delta_norm_m"] = float(np.linalg.norm(post_gripper_delta))
+                gripper_result["post_gripper_arm_rotation_delta_deg"] = rotation_angle_deg(
+                    post_gripper_T_link7[:3, :3] @ before_T_link7[:3, :3].T
+                )
+                gripper_result["post_gripper_translation_tracking"] = translation_tracking_report(
+                    target_delta,
+                    post_gripper_delta,
+                )
                 log(
                     f"step {idx}: gripper before={before_raw:.4f} "
                     f"after={after_raw:.4f} delta={after_raw - before_raw:+.4f}"
+                )
+                log(
+                    f"step {idx}: post_gripper_arm_delta={post_gripper_delta.tolist()} "
+                    f"norm={np.linalg.norm(post_gripper_delta):.4f} "
+                    f"rot_deg={gripper_result['post_gripper_arm_rotation_delta_deg']:.2f} "
+                    f"cos_to_target={gripper_result['post_gripper_translation_tracking'].get('cosine_to_target_delta')}"
                 )
             else:
                 gripper_result = {
@@ -942,6 +1004,7 @@ def main() -> int:
             step_record["settled_delta_norm_m"] = float(np.linalg.norm(observed_delta))
             step_record["observed_delta_m"] = observed_delta.tolist()
             step_record["observed_delta_norm_m"] = float(np.linalg.norm(observed_delta))
+            step_record["settled_translation_tracking"] = translation_tracking_report(target_delta, observed_delta)
             step_record["observed_rotation_delta_deg"] = rotation_angle_deg(
                 after_T_link7[:3, :3] @ before_T_link7[:3, :3].T
             )
