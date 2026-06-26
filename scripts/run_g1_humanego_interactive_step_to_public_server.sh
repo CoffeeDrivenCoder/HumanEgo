@@ -22,6 +22,11 @@ CFG="${G1_HUMANEGO_CFG:-cfg/inference/g1_serve_bread_right.yaml}"
 CONFIRM="${G1_HUMANEGO_CONFIRM:-}"
 MAX_STEPS="${G1_HUMANEGO_MAX_STEPS:-20}"
 CONTROL_MODE="${G1_HUMANEGO_CONTROL_MODE:-prompt}"
+TRACKING_GATE="${G1_HUMANEGO_TRACKING_GATE:-false}"
+TRACKING_MIN_RATIO="${G1_HUMANEGO_TRACKING_MIN_RATIO:-0.30}"
+TRACKING_MIN_COS="${G1_HUMANEGO_TRACKING_MIN_COS:-0.50}"
+TRACKING_MIN_TARGET_M="${G1_HUMANEGO_TRACKING_MIN_TARGET_M:-0.01}"
+TRACKING_BAD_STEPS="${G1_HUMANEGO_TRACKING_BAD_STEPS:-2}"
 TARGET_SOURCE="${G1_HUMANEGO_TARGET_SOURCE:-position_keep_orientation}"
 TARGET_ADAPTER="${G1_HUMANEGO_TARGET_ADAPTER:-full}"
 OBJECT_LOCK="${G1_HUMANEGO_OBJECT_LOCK:-none}"
@@ -61,6 +66,11 @@ if [[ "$EXECUTE_GRIPPER" == "true" || "$EXECUTE_GRIPPER" == "1" ]]; then
   EXECUTE_GRIPPER_ARG="--execute-gripper"
 fi
 
+TRACKING_GATE_ARG="--no-tracking-gate"
+if [[ "$TRACKING_GATE" == "true" || "$TRACKING_GATE" == "1" ]]; then
+  TRACKING_GATE_ARG="--tracking-gate"
+fi
+
 GRIPPER_TARGET_ARGS=()
 if [[ -n "$GRIPPER_TARGET" ]]; then
   GRIPPER_TARGET_ARGS=(--gripper-target "$GRIPPER_TARGET")
@@ -79,6 +89,11 @@ python3 scripts/g1_humanego_interactive_step_client.py \
   --confirm-control "$CONFIRM" \
   --max-steps "$MAX_STEPS" \
   --control-mode "$CONTROL_MODE" \
+  "$TRACKING_GATE_ARG" \
+  --tracking-min-ratio "$TRACKING_MIN_RATIO" \
+  --tracking-min-cos "$TRACKING_MIN_COS" \
+  --tracking-min-target-m "$TRACKING_MIN_TARGET_M" \
+  --tracking-bad-steps "$TRACKING_BAD_STEPS" \
   --target-source "$TARGET_SOURCE" \
   --approach-object-key "$APPROACH_OBJECT_KEY" \
   --object-lock "$OBJECT_LOCK" \

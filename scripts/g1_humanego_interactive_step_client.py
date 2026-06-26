@@ -228,6 +228,7 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
     post_ee_approach = step_record.get("post_ee_approach_metrics") or {}
     observed_approach = step_record.get("observed_approach_metrics") or {}
     axis = step_record.get("axis_alignment") or {}
+    tracking_gate = step_record.get("tracking_gate") or {}
     return {
         "idx": step_record.get("idx"),
         "request_id": step_record.get("request_id"),
@@ -251,6 +252,10 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
         "settled_delta_norm_m": step_record.get("settled_delta_norm_m"),
         "settled_rotation_delta_deg": step_record.get("observed_rotation_delta_deg"),
         "settled_cos_to_target": settled_tracking.get("cosine_to_target_delta"),
+        "tracking_ratio": tracking_gate.get("ratio"),
+        "tracking_gate_bad": tracking_gate.get("bad"),
+        "tracking_gate_bad_streak": tracking_gate.get("bad_streak"),
+        "tracking_gate_reason": tracking_gate.get("reason"),
         "distance_before_m": approach.get("before_link7_to_object_m"),
         "distance_target_m": approach.get("target_link7_to_object_m"),
         "distance_target_delta_m": approach.get("target_minus_before_m"),
@@ -814,6 +819,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--side", choices=["right", "left"], default="right")
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--control-mode", choices=["prompt", "auto"], default="prompt")
+    parser.add_argument("--tracking-gate", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--tracking-min-ratio", type=float, default=0.30)
+    parser.add_argument("--tracking-min-cos", type=float, default=0.50)
+    parser.add_argument("--tracking-min-target-m", type=float, default=0.01)
+    parser.add_argument("--tracking-bad-steps", type=int, default=2)
     parser.add_argument("--target-source", choices=["position_keep_orientation", "limited", "raw"], default="position_keep_orientation")
     parser.add_argument("--approach-object-key", default="obj1")
     parser.add_argument("--object-lock", choices=["none", "base_after_first"], default="none")
@@ -885,6 +895,7 @@ def main() -> int:
     step_summaries: list[dict[str, Any]] = []
     step_summaries_path = run_dir / "step_summaries.json"
     step_summaries_jsonl_path = run_dir / "step_summaries.jsonl"
+    tracking_bad_streak = 0
     try:
         from G1Camera import G1HeadRGBDCamera
         from G1RobotArm import G1RobotArmReadOnly
@@ -1239,6 +1250,38 @@ def main() -> int:
             step_record["observed_rotation_delta_deg"] = rotation_angle_deg(
                 after_T_link7[:3, :3] @ before_T_link7[:3, :3].T
             )
+            target_norm_for_gate = float(step_record["settled_translation_tracking"].get("target_norm_m") or 0.0)
+            observed_norm_for_gate = float(step_record["settled_translation_tracking"].get("observed_norm_m") or 0.0)
+            tracking_ratio = observed_norm_for_gate / target_norm_for_gate if target_norm_for_gate > EPS else None
+            tracking_cos = step_record["settled_translation_tracking"].get("cosine_to_target_delta")
+            tracking_bad = False
+            tracking_reason = None
+            if args.tracking_gate and target_norm_for_gate >= float(args.tracking_min_target_m):
+                ratio_bad = tracking_ratio is not None and tracking_ratio < float(args.tracking_min_ratio)
+                cos_bad = tracking_cos is not None and tracking_cos < float(args.tracking_min_cos)
+                tracking_bad = bool(ratio_bad or cos_bad)
+                if tracking_bad:
+                    reasons = []
+                    if ratio_bad:
+                        reasons.append(f"ratio {tracking_ratio:.3f} < {args.tracking_min_ratio:.3f}")
+                    if cos_bad:
+                        reasons.append(f"cos {tracking_cos:.3f} < {args.tracking_min_cos:.3f}")
+                    tracking_reason = "; ".join(reasons)
+                    tracking_bad_streak += 1
+                else:
+                    tracking_bad_streak = 0
+            step_record["tracking_gate"] = {
+                "enabled": bool(args.tracking_gate),
+                "ratio": tracking_ratio,
+                "cosine": tracking_cos,
+                "bad": tracking_bad,
+                "bad_streak": tracking_bad_streak,
+                "reason": tracking_reason,
+                "min_ratio": float(args.tracking_min_ratio),
+                "min_cos": float(args.tracking_min_cos),
+                "min_target_m": float(args.tracking_min_target_m),
+                "bad_steps_to_stop": int(args.tracking_bad_steps),
+            }
             step_record["observed_rotation_vector_base_deg"] = rotation_vector_from_delta(
                 after_T_link7[:3, :3] @ before_T_link7[:3, :3].T
             ).tolist()
@@ -1275,8 +1318,32 @@ def main() -> int:
                 json.dumps(json_safe(step_record), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            if args.tracking_gate and tracking_bad_streak >= max(1, int(args.tracking_bad_steps)):
+                stop_reason = {
+                    "type": "tracking_gate",
+                    "step": idx,
+                    "bad_streak": tracking_bad_streak,
+                    "reason": tracking_reason,
+                    "ratio": tracking_ratio,
+                    "cosine": tracking_cos,
+                    "target_delta_norm_m": target_norm_for_gate,
+                    "settled_delta_norm_m": observed_norm_for_gate,
+                }
+                report["stopped_by"] = stop_reason
+                log(f"tracking gate stopping run: {stop_reason}")
+                break
 
         report["ok"] = True
+    except KeyboardInterrupt:
+        report.update(
+            {
+                "ok": False,
+                "interrupted": True,
+                "error_type": "KeyboardInterrupt",
+                "error": "Interrupted by operator",
+                "traceback": traceback.format_exc(),
+            }
+        )
     except Exception as exc:
         report.update(
             {
