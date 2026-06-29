@@ -41,6 +41,9 @@ LIFETIME="${G1_HUMANEGO_LIFETIME:-1.5}"
 SEND_HZ="${G1_HUMANEGO_SEND_HZ:-20}"
 EXECUTE_S="${G1_HUMANEGO_EXECUTE_S:-3.0}"
 SETTLE_S="${G1_HUMANEGO_SETTLE_S:-1.5}"
+EE_CONTROL_MODE="${G1_HUMANEGO_EE_CONTROL_MODE:-absolute_pose}"
+DELTA_POSE_ROTATION_FRAME="${G1_HUMANEGO_DELTA_POSE_ROTATION_FRAME:-base}"
+DELTA_POSE_REFERENCE_TIME="${G1_HUMANEGO_DELTA_POSE_REFERENCE_TIME:-}"
 EXECUTE_GRIPPER="${G1_HUMANEGO_EXECUTE_GRIPPER:-false}"
 GRIPPER_SOURCE="${G1_HUMANEGO_GRIPPER_SOURCE:-model}"
 GRIPPER_TARGET="${G1_HUMANEGO_GRIPPER_TARGET:-}"
@@ -76,6 +79,11 @@ if [[ -n "$GRIPPER_TARGET" ]]; then
   GRIPPER_TARGET_ARGS=(--gripper-target "$GRIPPER_TARGET")
 fi
 
+DELTA_POSE_REFERENCE_ARGS=()
+if [[ -n "$DELTA_POSE_REFERENCE_TIME" ]]; then
+  DELTA_POSE_REFERENCE_ARGS=(--delta-pose-reference-time "$DELTA_POSE_REFERENCE_TIME")
+fi
+
 OBJECT_LOCK_CLEAN_ARG="--object-lock-require-clean"
 if [[ "$OBJECT_LOCK_REQUIRE_CLEAN" == "false" || "$OBJECT_LOCK_REQUIRE_CLEAN" == "0" ]]; then
   OBJECT_LOCK_CLEAN_ARG="--no-object-lock-require-clean"
@@ -109,6 +117,9 @@ python3 scripts/g1_humanego_interactive_step_client.py \
   --send-hz "$SEND_HZ" \
   --execute-s "$EXECUTE_S" \
   --settle-s "$SETTLE_S" \
+  --ee-control-mode "$EE_CONTROL_MODE" \
+  --delta-pose-rotation-frame "$DELTA_POSE_ROTATION_FRAME" \
+  "${DELTA_POSE_REFERENCE_ARGS[@]}" \
   "$EXECUTE_GRIPPER_ARG" \
   --gripper-source "$GRIPPER_SOURCE" \
   "${GRIPPER_TARGET_ARGS[@]}" \

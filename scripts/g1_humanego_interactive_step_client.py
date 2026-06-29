@@ -7,10 +7,9 @@ Each iteration:
   2. ask the HumanEgo server for one target
   3. print the proposed target
   4. wait for operator input
-  5. execute exactly one set_end_effector_pose_control command
+  5. execute exactly one EE control command
 
-This script is intentionally step-by-step. It never loops into autonomous
-continuous control.
+This script is intentionally step-by-step unless --control-mode auto is set.
 """
 
 from __future__ import annotations
@@ -229,6 +228,8 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
     observed_approach = step_record.get("observed_approach_metrics") or {}
     axis = step_record.get("axis_alignment") or {}
     tracking_gate = step_record.get("tracking_gate") or {}
+    control_result = step_record.get("control_result") or {}
+    control_delta_pose = control_result.get("delta_pose") or {}
     return {
         "idx": step_record.get("idx"),
         "request_id": step_record.get("request_id"),
@@ -242,6 +243,10 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
         "target_delta_m": step_record.get("target_delta_m"),
         "target_delta_norm_m": step_record.get("target_delta_norm_m"),
         "target_rotation_delta_deg": step_record.get("target_rotation_delta_deg"),
+        "ee_control_mode": step_record.get("ee_control_mode"),
+        "delta_pose_action_data": control_delta_pose.get("action_data"),
+        "delta_pose_rotation_vector_deg": control_delta_pose.get("rotation_vector_deg"),
+        "delta_pose_rotation_frame": control_delta_pose.get("rotation_frame"),
         "server_raw_delta_norm_m": (((response.get("policy_preview") or {}).get("sides") or {}).get("right") or [{}])[0].get("safety_translation_limit", {}).get("raw_delta_norm_m"),
         "server_clipped": (((response.get("policy_preview") or {}).get("sides") or {}).get("right") or [{}])[0].get("safety_translation_limit", {}).get("clipped"),
         "post_ee_delta_m": step_record.get("post_ee_delta_m"),
@@ -335,6 +340,59 @@ def rotation_vector_from_delta(R_delta: np.ndarray) -> np.ndarray:
     if axis_norm <= EPS:
         return np.zeros(3, dtype=np.float64)
     return axis / axis_norm * np.degrees(angle)
+
+
+def rotation_vector_rad_from_delta(R_delta: np.ndarray) -> np.ndarray:
+    R_delta = np.asarray(R_delta, dtype=np.float64).reshape(3, 3)
+    angle = np.radians(rotation_angle_deg(R_delta))
+    if abs(angle) <= EPS:
+        return np.zeros(3, dtype=np.float64)
+    axis = np.array(
+        [
+            R_delta[2, 1] - R_delta[1, 2],
+            R_delta[0, 2] - R_delta[2, 0],
+            R_delta[1, 0] - R_delta[0, 1],
+        ],
+        dtype=np.float64,
+    )
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm <= EPS:
+        return np.zeros(3, dtype=np.float64)
+    return axis / axis_norm * angle
+
+
+def link7_delta_pose_command(
+    before_T_link7: np.ndarray,
+    target_T_link7: np.ndarray,
+    rotation_frame: str = "base",
+) -> dict[str, Any]:
+    before_T_link7 = np.asarray(before_T_link7, dtype=np.float64).reshape(4, 4)
+    target_T_link7 = np.asarray(target_T_link7, dtype=np.float64).reshape(4, 4)
+    translation_delta = target_T_link7[:3, 3] - before_T_link7[:3, 3]
+    if rotation_frame == "base":
+        R_delta = target_T_link7[:3, :3] @ before_T_link7[:3, :3].T
+    elif rotation_frame == "local":
+        R_delta = before_T_link7[:3, :3].T @ target_T_link7[:3, :3]
+    else:
+        raise ValueError(f"unknown delta pose rotation frame {rotation_frame!r}; expected base/local")
+    rotvec_rad = rotation_vector_rad_from_delta(R_delta)
+    action_data = [
+        float(translation_delta[0]),
+        float(translation_delta[1]),
+        float(translation_delta[2]),
+        float(rotvec_rad[0]),
+        float(rotvec_rad[1]),
+        float(rotvec_rad[2]),
+    ]
+    return {
+        "translation_delta_m": translation_delta.tolist(),
+        "rotation_frame": rotation_frame,
+        "rotation_delta_matrix": R_delta.tolist(),
+        "rotation_vector_rad": rotvec_rad.tolist(),
+        "rotation_vector_deg": np.degrees(rotvec_rad).tolist(),
+        "rotation_angle_deg": rotation_angle_deg(R_delta),
+        "action_data": action_data,
+    }
 
 
 def limited_rotation(R_start: np.ndarray, R_target: np.ndarray, max_angle_deg: float) -> tuple[np.ndarray, dict[str, Any]]:
@@ -657,6 +715,176 @@ def call_ee_control(
     }
 
 
+def read_joint_state_with_retry(
+    getter: Any,
+    name: str,
+    min_len: int,
+    tries: int = 20,
+    sleep_s: float = 0.05,
+) -> dict[str, Any]:
+    last_raw = None
+    last_error = None
+    for _ in range(max(1, int(tries))):
+        raw = getter()
+        last_raw = raw
+        try:
+            values = coerce_float_list(raw)
+            if len(values) >= int(min_len):
+                data, timestamp = split_state_result(raw)
+                return {
+                    "values": values,
+                    "raw": json_safe(raw),
+                    "data": json_safe(data),
+                    "timestamp": json_safe(timestamp),
+                    "length": len(values),
+                }
+            last_error = f"expected at least {min_len} values, got {len(values)}"
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(max(0.0, float(sleep_s)))
+    raise RuntimeError(f"{name} not ready after {tries} tries: {last_error}; last_raw={last_raw!r}")
+
+
+def read_robot_joint_states_for_trajectory(robot: Any) -> dict[str, Any]:
+    head_state = read_joint_state_with_retry(robot.head_joint_states, "head_joint_states", min_len=2)
+    waist_state = read_joint_state_with_retry(robot.waist_joint_states, "waist_joint_states", min_len=2)
+    arm_state = read_joint_state_with_retry(robot.arm_joint_states, "arm_joint_states", min_len=14)
+    head = head_state["values"]
+    waist = waist_state["values"]
+    arm = arm_state["values"]
+    return {
+        "head": head,
+        "waist": waist,
+        "arm": arm,
+        "raw": {
+            "head": head_state["raw"],
+            "waist": waist_state["raw"],
+            "arm": arm_state["raw"],
+        },
+        "timestamps": {
+            "head": head_state["timestamp"],
+            "waist": waist_state["timestamp"],
+            "arm": arm_state["timestamp"],
+        },
+        "lengths": {
+            "head": head_state["length"],
+            "waist": waist_state["length"],
+            "arm": arm_state["length"],
+        },
+    }
+
+
+def call_ee_delta_pose_trajectory_once(
+    controller: Any,
+    robot: Any,
+    before_T_link7: np.ndarray,
+    target_T_link7: np.ndarray,
+    side: str,
+    trajectory_reference_time: float,
+    rotation_frame: str,
+) -> dict[str, Any]:
+    delta_pose = link7_delta_pose_command(before_T_link7, target_T_link7, rotation_frame=rotation_frame)
+    joint_states = read_robot_joint_states_for_trajectory(robot)
+    zero = [0.0] * 6
+    action_data = [float(v) for v in delta_pose["action_data"]]
+    robot_action = {
+        "left_arm": {
+            "action_data": action_data if side == "left" else zero,
+            "control_type": "DELTA_POSE",
+        },
+        "right_arm": {
+            "action_data": action_data if side == "right" else zero,
+            "control_type": "DELTA_POSE",
+        },
+    }
+    infer_timestamp = int(time.time() * 1e9)
+    robot_states = {
+        "head": joint_states["head"],
+        "waist": joint_states["waist"],
+        "arm": joint_states["arm"],
+    }
+    kwargs = {
+        "infer_timestamp": infer_timestamp,
+        "robot_states": robot_states,
+        "robot_actions": [robot_action],
+        "robot_link": "base_link",
+        "trajectory_reference_time": float(trajectory_reference_time),
+    }
+    started = time.time()
+    try:
+        result = controller.trajectory_tracking_control(**kwargs)
+        return {
+            "ok": True,
+            "duration_s": time.time() - started,
+            "mode": "delta_pose",
+            "side": side,
+            "delta_pose": delta_pose,
+            "joint_states": joint_states,
+            "kwargs": json_safe(kwargs),
+            "result": json_safe(result),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "duration_s": time.time() - started,
+            "mode": "delta_pose",
+            "side": side,
+            "delta_pose": delta_pose,
+            "joint_states": joint_states,
+            "kwargs": json_safe(kwargs),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
+def call_ee_control_mode(
+    controller: Any,
+    robot: Any,
+    pose: dict[str, float],
+    before_T_link7: np.ndarray,
+    target_T_link7: np.ndarray,
+    side: str,
+    lifetime: float,
+    send_hz: float,
+    execute_s: float,
+    mode: str,
+    delta_pose_rotation_frame: str,
+    delta_pose_reference_time: float | None,
+) -> dict[str, Any]:
+    if mode == "absolute_pose":
+        result = call_ee_control(controller, pose, side, lifetime, send_hz, execute_s)
+        result["ee_control_mode"] = mode
+        return result
+    if mode == "delta_pose":
+        reference_time = float(delta_pose_reference_time) if delta_pose_reference_time is not None else float(execute_s)
+        reference_time = max(reference_time, 0.05)
+        started = time.time()
+        result = call_ee_delta_pose_trajectory_once(
+            controller,
+            robot,
+            before_T_link7,
+            target_T_link7,
+            side,
+            reference_time,
+            delta_pose_rotation_frame,
+        )
+        command_duration_s = float(result.get("duration_s", 0.0))
+        if result.get("ok"):
+            wait_s = max(0.0, float(execute_s) - (time.time() - started))
+            if wait_s > 0.0:
+                time.sleep(wait_s)
+        result["ee_control_mode"] = mode
+        result["send_mode"] = "single_delta_pose"
+        result["num_sends"] = 1
+        result["command_duration_s"] = command_duration_s
+        result["duration_s"] = time.time() - started
+        result["execute_s"] = float(execute_s)
+        result["trajectory_reference_time"] = reference_time
+        return result
+    raise ValueError(f"unknown EE control mode {mode!r}")
+
+
 def split_state_result(value: Any) -> tuple[Any, Any]:
     if isinstance(value, tuple) and len(value) == 2:
         return value[0], value[1]
@@ -851,6 +1079,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--send-hz", type=float, default=10.0)
     parser.add_argument("--execute-s", type=float, default=1.0)
     parser.add_argument("--settle-s", type=float, default=1.0)
+    parser.add_argument("--ee-control-mode", choices=["absolute_pose", "delta_pose"], default="absolute_pose")
+    parser.add_argument("--delta-pose-rotation-frame", choices=["base", "local"], default="base")
+    parser.add_argument("--delta-pose-reference-time", type=float, default=None)
     parser.add_argument("--execute-gripper", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gripper-source", choices=["model", "hold", "open", "closed", "manual"], default="model")
     parser.add_argument("--gripper-target", type=float, default=None)
@@ -1021,6 +1252,19 @@ def main() -> int:
                 print(f"object_error: {object_error.get('error_type')}: {object_error.get('error')}")
             print(f"target_source: {args.target_source}")
             print(f"target_adapter: {args.target_adapter}")
+            print(f"ee_control_mode: {args.ee_control_mode}")
+            if args.ee_control_mode == "delta_pose":
+                delta_preview = link7_delta_pose_command(
+                    before_T_link7,
+                    target_T_link7,
+                    rotation_frame=args.delta_pose_rotation_frame,
+                )
+                print(
+                    "delta_pose command: "
+                    f"action_data={delta_preview['action_data']} "
+                    f"rotvec_deg={delta_preview['rotation_vector_deg']} "
+                    f"frame={delta_preview['rotation_frame']}"
+                )
             if abs(float(args.target_z_bias_m)) > EPS:
                 print(f"target_z_bias_m: {args.target_z_bias_m:+.4f}")
             print(f"target_delta_m: {target_delta.tolist()}  norm={target_delta_norm:.4f}")
@@ -1076,6 +1320,7 @@ def main() -> int:
                 "server_ok": bool(response.get("ok")),
                 "target_source": args.target_source,
                 "target_adapter": args.target_adapter,
+                "ee_control_mode": args.ee_control_mode,
                 "raw_target_pose": raw_target_pose,
                 "target_pose": target_pose,
                 "target_adapter_info": adapter_info,
@@ -1133,13 +1378,19 @@ def main() -> int:
                 break
 
             log(f"step {idx}: executing one EE target")
-            control_result = call_ee_control(
+            control_result = call_ee_control_mode(
                 arm.controller,
+                arm.robot,
                 target_pose,
+                before_T_link7,
+                target_T_link7,
                 args.side,
                 args.lifetime,
                 args.send_hz,
                 args.execute_s,
+                args.ee_control_mode,
+                args.delta_pose_rotation_frame,
+                args.delta_pose_reference_time,
             )
             report["control_sent"] = True
             step_record["executed"] = bool(control_result.get("ok"))
