@@ -294,6 +294,12 @@ def object_warning_summary(response: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def rotation_angle_deg(R_delta: np.ndarray) -> float:
+    R_delta = np.asarray(R_delta, dtype=np.float64).reshape(3, 3)
+    value = (float(np.trace(R_delta)) - 1.0) * 0.5
+    return float(np.degrees(np.arccos(np.clip(value, -1.0, 1.0))))
+
+
 def make_contact_sheet(panels: list[tuple[str, np.ndarray]], out_path: Path, cell_w: int = 360) -> str | None:
     if not panels:
         return None
@@ -412,6 +418,167 @@ class InferenceRuntime:
         self.lock = threading.Lock()
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
+    def _infer_preview_from_state(
+        self,
+        *,
+        x_rgb: Any,
+        objects: dict[str, ObjectState],
+        K: np.ndarray,
+        image_w: int,
+        image_h: int,
+        T_base_camera: np.ndarray,
+        T_tcp_in_link7: np.ndarray,
+        T_link7_in_base: np.ndarray,
+        gripper: float,
+        max_steps: int,
+    ) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
+        anchor = objects.get(self.anchor_key)
+        if anchor is None:
+            raise ValueError(f"anchor_key {self.anchor_key!r} not found in objects {sorted(objects.keys())}")
+        T_base_in_cam = np.linalg.inv(T_base_camera)
+        T_tcp_in_base = T_link7_in_base @ T_tcp_in_link7
+        T_tcp_in_cam = T_base_in_cam @ T_tcp_in_base
+        T_hand_in_cam = T_tcp_in_cam @ self.T_align
+        x_ict, ict_mask = self.policy.build_ict({"right": T_hand_in_cam}, {"right": gripper}, objects, self.anchor_key)
+        anchor_uv = self.policy.compute_anchor_uv(anchor, K, image_w, image_h)
+        traj, done_prob = self.policy.infer(x_rgb, x_ict, ict_mask, anchor_uv)
+        preview = build_target_preview(
+            traj=traj,
+            done_prob=done_prob,
+            policy=self.policy,
+            anchor=anchor,
+            T_align=self.T_align,
+            T_base_camera=T_base_camera,
+            T_tcp_in_link7=T_tcp_in_link7,
+            T_link7_current_in_base=T_link7_in_base,
+            max_step_m=self.max_step_m,
+            max_steps=max_steps,
+        )
+        return preview, T_tcp_in_cam, T_hand_in_cam
+
+    def _autoregressive_rollout(
+        self,
+        *,
+        x_rgb: Any,
+        objects: dict[str, ObjectState],
+        K: np.ndarray,
+        image_w: int,
+        image_h: int,
+        T_base_camera: np.ndarray,
+        T_tcp_in_link7: np.ndarray,
+        T_link7_start_in_base: np.ndarray,
+        gripper_start: float,
+        rollout_steps: int,
+        side: str,
+        target_source: str,
+        update_gripper: bool,
+    ) -> dict[str, Any]:
+        current_T = np.asarray(T_link7_start_in_base, dtype=np.float64).reshape(4, 4).copy()
+        gripper = float(gripper_start)
+        steps: list[dict[str, Any]] = []
+        target_source = str(target_source or "raw").lower()
+        if target_source not in {"raw", "limited"}:
+            raise ValueError(f"unknown rollout_target_source {target_source!r}; expected raw/limited")
+
+        for idx in range(max(0, int(rollout_steps))):
+            preview, current_T_tcp_in_cam, _current_T_hand_in_cam = self._infer_preview_from_state(
+                x_rgb=x_rgb,
+                objects=objects,
+                K=K,
+                image_w=image_w,
+                image_h=image_h,
+                T_base_camera=T_base_camera,
+                T_tcp_in_link7=T_tcp_in_link7,
+                T_link7_in_base=current_T,
+                gripper=gripper,
+                max_steps=1,
+            )
+            side_steps = ((preview.get("sides") or {}).get(side) or [])
+            if not side_steps:
+                steps.append(
+                    {
+                        "idx": idx,
+                        "ok": False,
+                        "reason": f"policy preview missing side {side!r}",
+                        "current_T_link7_in_base": matrix_json(current_T),
+                        "gripper": gripper,
+                    }
+                )
+                break
+            first = side_steps[0]
+            raw_T = np.asarray(first["T_link7_target_in_base"], dtype=np.float64).reshape(4, 4)
+            limited_T = np.asarray(first["T_link7_target_in_base_limited"], dtype=np.float64).reshape(4, 4)
+            next_T = raw_T if target_source == "raw" else limited_T
+            next_T_tcp_in_base = next_T @ T_tcp_in_link7
+            next_T_tcp_in_cam = np.linalg.inv(T_base_camera) @ next_T_tcp_in_base
+            raw_delta = raw_T[:3, 3] - current_T[:3, 3]
+            limited_delta = limited_T[:3, 3] - current_T[:3, 3]
+            selected_delta = next_T[:3, 3] - current_T[:3, 3]
+            raw_rot_deg = rotation_angle_deg(raw_T[:3, :3] @ current_T[:3, :3].T)
+            limited_rot_deg = rotation_angle_deg(limited_T[:3, :3] @ current_T[:3, :3].T)
+            selected_rot_deg = rotation_angle_deg(next_T[:3, :3] @ current_T[:3, :3].T)
+            gripper_target = float(first.get("gripper_humanego_0_open_1_closed", gripper))
+            approach_metrics: dict[str, Any] = {}
+            for obj_key, obj in objects.items():
+                obj_pos = np.asarray(obj.T_in_cam, dtype=np.float64)[:3, 3]
+                before_dist = float(np.linalg.norm(current_T_tcp_in_cam[:3, 3] - obj_pos))
+                target_dist = float(np.linalg.norm(next_T_tcp_in_cam[:3, 3] - obj_pos))
+                approach_metrics[str(obj_key)] = {
+                    "object_position_in_cam": obj_pos.tolist(),
+                    "current_tcp_to_object_m": before_dist,
+                    "target_tcp_to_object_m": target_dist,
+                    "target_minus_current_m": target_dist - before_dist,
+                    "closer": bool(target_dist < before_dist),
+                }
+            steps.append(
+                {
+                    "idx": idx,
+                    "ok": True,
+                    "done_prob": preview.get("done_prob"),
+                    "current_T_link7_in_base": matrix_json(current_T),
+                    "current_T_tcp_in_cam": matrix_json(current_T_tcp_in_cam),
+                    "gripper_input_0_open_1_closed": gripper,
+                    "gripper_target_0_open_1_closed": gripper_target,
+                    "target_source_used_for_next_current": target_source,
+                    "raw": {
+                        "T_link7_target_in_base": matrix_json(raw_T),
+                        "pose_flat": first.get(f"{side}_pose_flat_raw"),
+                        "delta_m": raw_delta.tolist(),
+                        "delta_norm_m": float(np.linalg.norm(raw_delta)),
+                        "rotation_delta_deg": raw_rot_deg,
+                    },
+                    "limited": {
+                        "T_link7_target_in_base": matrix_json(limited_T),
+                        "pose_flat": first.get(f"{side}_pose_flat_limited"),
+                        "delta_m": limited_delta.tolist(),
+                        "delta_norm_m": float(np.linalg.norm(limited_delta)),
+                        "rotation_delta_deg": limited_rot_deg,
+                        "safety_translation_limit": first.get("safety_translation_limit"),
+                    },
+                    "selected": {
+                        "T_link7_target_in_base": matrix_json(next_T),
+                        "T_tcp_target_in_cam": matrix_json(next_T_tcp_in_cam),
+                        "delta_m": selected_delta.tolist(),
+                        "delta_norm_m": float(np.linalg.norm(selected_delta)),
+                        "rotation_delta_deg": selected_rot_deg,
+                    },
+                    "approach_metrics": approach_metrics,
+                }
+            )
+            current_T = next_T.copy()
+            if update_gripper:
+                gripper = float(np.clip(gripper_target, 0.0, 1.0))
+
+        return {
+            "ok": all(item.get("ok", False) for item in steps),
+            "num_steps_requested": int(rollout_steps),
+            "num_steps": len(steps),
+            "side": side,
+            "target_source": target_source,
+            "update_gripper": bool(update_gripper),
+            "steps": steps,
+        }
+
     def infer(self, payload: dict[str, Any]) -> dict[str, Any]:
         started = time.time()
         safe_id = safe_request_id(payload.get("request_id"))
@@ -426,8 +593,6 @@ class InferenceRuntime:
         T_base_camera = read_matrix(current, "T_base_camera")
         T_link7_in_base = read_matrix(current, "T_link7_in_base")
         T_tcp_in_link7 = read_matrix(current, "T_tcp_in_link7")
-        T_tcp_in_cam = read_matrix(current, "T_tcp_in_cam")
-        T_hand_in_cam = T_tcp_in_cam @ self.T_align
         gripper = float(current.get("gripper", 0.0))
 
         object_source_used = "payload"
@@ -463,24 +628,38 @@ class InferenceRuntime:
         if anchor is None:
             raise ValueError(f"anchor_key {self.anchor_key!r} not found in objects {sorted(objects.keys())}")
 
+        rollout = None
         with self.lock:
             x_rgb = self.policy.prepare_image(rgb_bgr)
-            x_ict, ict_mask = self.policy.build_ict({"right": T_hand_in_cam}, {"right": gripper}, objects, self.anchor_key)
-            anchor_uv = self.policy.compute_anchor_uv(anchor, K, w, h)
-            traj, done_prob = self.policy.infer(x_rgb, x_ict, ict_mask, anchor_uv)
-
-        preview = build_target_preview(
-            traj=traj,
-            done_prob=done_prob,
-            policy=self.policy,
-            anchor=anchor,
-            T_align=self.T_align,
-            T_base_camera=T_base_camera,
-            T_tcp_in_link7=T_tcp_in_link7,
-            T_link7_current_in_base=T_link7_in_base,
-            max_step_m=self.max_step_m,
-            max_steps=int(payload.get("preview_steps", self.preview_steps)),
-        )
+            preview, T_tcp_in_cam, T_hand_in_cam = self._infer_preview_from_state(
+                x_rgb=x_rgb,
+                objects=objects,
+                K=K,
+                image_w=w,
+                image_h=h,
+                T_base_camera=T_base_camera,
+                T_tcp_in_link7=T_tcp_in_link7,
+                T_link7_in_base=T_link7_in_base,
+                gripper=gripper,
+                max_steps=int(payload.get("preview_steps", self.preview_steps)),
+            )
+            rollout_steps = int(payload.get("rollout_steps", 0) or 0)
+            if rollout_steps > 0:
+                rollout = self._autoregressive_rollout(
+                    x_rgb=x_rgb,
+                    objects=objects,
+                    K=K,
+                    image_w=w,
+                    image_h=h,
+                    T_base_camera=T_base_camera,
+                    T_tcp_in_link7=T_tcp_in_link7,
+                    T_link7_start_in_base=T_link7_in_base,
+                    gripper_start=gripper,
+                    rollout_steps=rollout_steps,
+                    side=str(payload.get("rollout_side", "right")),
+                    target_source=str(payload.get("rollout_target_source", "raw")),
+                    update_gripper=bool(payload.get("rollout_update_gripper", True)),
+                )
 
         response = {
             "ok": True,
@@ -516,6 +695,8 @@ class InferenceRuntime:
             "policy_preview": preview,
             "latency_s": time.time() - started,
         }
+        if rollout is not None:
+            response["autoregressive_rollout"] = rollout
         try:
             response["vision_summary"] = save_vision_diagnostics(response, rgb_bgr, depth_m, run_dir)
         except Exception as exc:

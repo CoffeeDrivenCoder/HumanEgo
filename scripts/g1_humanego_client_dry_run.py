@@ -227,6 +227,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--send-width", type=int, default=0)
     parser.add_argument("--send-height", type=int, default=0)
     parser.add_argument("--preview-steps", type=int, default=3)
+    parser.add_argument("--rollout-steps", type=int, default=0)
+    parser.add_argument("--rollout-target-source", choices=["raw", "limited"], default="raw")
+    parser.add_argument("--rollout-update-gripper", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--upload-timeout-s", type=float, default=20.0)
     parser.add_argument("--send-depth", action=argparse.BooleanOptionalAction, default=False)
@@ -303,6 +306,10 @@ def main() -> int:
                 "request_id": request_id,
                 "client_time_utc": datetime.now(timezone.utc).isoformat(),
                 "preview_steps": int(args.preview_steps),
+                "rollout_steps": int(args.rollout_steps),
+                "rollout_side": "right",
+                "rollout_target_source": args.rollout_target_source,
+                "rollout_update_gripper": bool(args.rollout_update_gripper),
                 "K": np.asarray(K_send, dtype=np.float64).tolist(),
                 "rgb_jpeg_b64": jpeg_b64,
                 "frame_summary": {
@@ -364,6 +371,15 @@ def main() -> int:
                     "duration_s": elapsed,
                     "server_response": server_result["json"],
                 }
+                rollout = (server_result["json"].get("autoregressive_rollout") or {})
+                if rollout:
+                    rollout_path = iter_dir / "autoregressive_rollout.json"
+                    rollout_path.write_text(
+                        json.dumps(json_safe(rollout), ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    item["autoregressive_rollout_path"] = str(rollout_path)
+                    item["autoregressive_rollout_steps"] = rollout.get("num_steps")
             except Exception as exc:
                 item = {
                     "idx": idx,

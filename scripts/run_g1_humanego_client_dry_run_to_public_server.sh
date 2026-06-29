@@ -21,6 +21,9 @@ TAG="${G1_HUMANEGO_TAG:-client_dry_run}"
 CFG="${G1_HUMANEGO_CFG:-cfg/inference/g1_serve_bread_right.yaml}"
 STEPS="${G1_HUMANEGO_STEPS:-1}"
 PREVIEW_STEPS="${G1_HUMANEGO_PREVIEW_STEPS:-1}"
+ROLLOUT_STEPS="${G1_HUMANEGO_ROLLOUT_STEPS:-0}"
+ROLLOUT_TARGET_SOURCE="${G1_HUMANEGO_ROLLOUT_TARGET_SOURCE:-raw}"
+ROLLOUT_UPDATE_GRIPPER="${G1_HUMANEGO_ROLLOUT_UPDATE_GRIPPER:-true}"
 JPEG_QUALITY="${G1_HUMANEGO_JPEG_QUALITY:-75}"
 SEND_WIDTH="${G1_HUMANEGO_SEND_WIDTH:-320}"
 SEND_HEIGHT="${G1_HUMANEGO_SEND_HEIGHT:-240}"
@@ -47,6 +50,11 @@ if [[ "$SEND_DEPTH" == "true" || "$SEND_DEPTH" == "1" ]]; then
   SEND_DEPTH_ARG="--send-depth"
 fi
 
+ROLLOUT_UPDATE_GRIPPER_ARG="--no-rollout-update-gripper"
+if [[ "$ROLLOUT_UPDATE_GRIPPER" == "true" || "$ROLLOUT_UPDATE_GRIPPER" == "1" ]]; then
+  ROLLOUT_UPDATE_GRIPPER_ARG="--rollout-update-gripper"
+fi
+
 CLOSE_ARM_ARG="--no-close-arm"
 if [[ "$CLOSE_ARM" == "true" || "$CLOSE_ARM" == "1" ]]; then
   CLOSE_ARM_ARG="--close-arm"
@@ -59,6 +67,8 @@ python3 scripts/g1_humanego_client_dry_run.py \
   --tag "$TAG" \
   --steps "$STEPS" \
   --preview-steps "$PREVIEW_STEPS" \
+  --rollout-steps "$ROLLOUT_STEPS" \
+  --rollout-target-source "$ROLLOUT_TARGET_SOURCE" \
   --jpeg-quality "$JPEG_QUALITY" \
   --send-width "$SEND_WIDTH" \
   --send-height "$SEND_HEIGHT" \
@@ -66,6 +76,7 @@ python3 scripts/g1_humanego_client_dry_run.py \
   --upload-timeout-s "$UPLOAD_TIMEOUT_S" \
   "$SAVE_DEPTH_ARG" \
   "$SEND_DEPTH_ARG" \
+  "$ROLLOUT_UPDATE_GRIPPER_ARG" \
   --depth-encoding "$DEPTH_ENCODING" \
   "$CLOSE_CAMERA_ARG" \
   "$CLOSE_ARM_ARG" \
