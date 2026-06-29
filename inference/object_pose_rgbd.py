@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -43,6 +44,8 @@ class RGBDObjectPoseConfig:
     fallback_dilate_px: int = 3
     fallback_depth_window_px: int = 6
     object_filters: Dict[str, Dict[str, Any]] | None = None
+    allow_non_anchor_object_fallback: bool = False
+    fallback_object_poses_cam: Dict[str, Any] | None = None
 
 
 def _as_config(cfg: dict) -> RGBDObjectPoseConfig:
@@ -63,6 +66,8 @@ def _as_config(cfg: dict) -> RGBDObjectPoseConfig:
         fallback_dilate_px=int(cfg.get("fallback_dilate_px", 3)),
         fallback_depth_window_px=int(cfg.get("fallback_depth_window_px", 6)),
         object_filters=dict(cfg.get("object_filters", {})),
+        allow_non_anchor_object_fallback=bool(cfg.get("allow_non_anchor_object_fallback", False)),
+        fallback_object_poses_cam=dict(cfg.get("dry_run_object_poses_cam", {})),
     )
 
 
@@ -76,6 +81,27 @@ class RGBDObjectPoseEstimator:
     def __init__(self, cfg: dict | RGBDObjectPoseConfig):
         self.cfg = _as_config(cfg) if isinstance(cfg, dict) else cfg
         self.detector = DINOSAM(self.cfg.dinosam_cfg_path)
+
+    def fallback_object_state(self, obj_key: str) -> ObjectState | None:
+        items = self.cfg.fallback_object_poses_cam or {}
+        item = items.get(obj_key)
+        if not item:
+            return None
+        T = np.asarray(item.get("T_in_cam"), dtype=np.float32).reshape(4, 4)
+        # A small canonical local cloud is enough for ICT object-token shape and
+        # debug visualization when a non-anchor object is only contextual.
+        s = 0.03
+        kpts = np.array(
+            [
+                [-s, -s, 0.0],
+                [-s, s, 0.0],
+                [s, -s, 0.0],
+                [s, s, 0.0],
+                [0.0, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+        return ObjectState(T_in_cam=T, kpts_local=kpts)
 
     def estimate(self, frames: List[Frame]) -> Dict[str, ObjectState]:
         objects, _debug = self.estimate_with_debug(frames)
@@ -112,43 +138,61 @@ class RGBDObjectPoseEstimator:
         }
 
         for obj_key, prompt in self.cfg.object_prompts.items():
-            mask, selection_debug = self.segment_object(frame, obj_key, prompt)
-            pts_cam, point_info = self.mask_to_points(frame.depth_m, frame.K, mask, return_info=True)
-            self.validate_point_info(obj_key, point_info)
-            T_obj_in_cam, _info = self.points_to_pose(
-                pts_cam,
-                is_anchor=(obj_key == self.cfg.anchor_key),
-                anchor_center_cam=anchor_center,
-            )
-            if obj_key == self.cfg.anchor_key:
-                anchor_center = T_obj_in_cam[:3, 3].copy()
-
-            kpts_local = self.points_to_local(pts_cam, T_obj_in_cam)
-            objs[obj_key] = ObjectState(
-                T_in_cam=T_obj_in_cam.astype(np.float32),
-                kpts_local=kpts_local.astype(np.float32),
-            )
-            object_debug = {
-                "prompt": prompt,
-                "T_in_cam": T_obj_in_cam.tolist(),
-                "kpts_local_count": int(len(kpts_local)),
-                "segmentation": selection_debug,
-                "points": {k: v for k, v in point_info.items() if not k.startswith("_")},
-                "saved_files": {},
-            }
-            if debug_path is not None:
-                object_debug["saved_files"] = self.save_debug_images(
-                    debug_path,
-                    obj_key,
-                    frame.rgb,
-                    frame.depth_m,
-                    frame.K,
-                    mask,
-                    point_info,
-                    T_obj_in_cam,
-                    selection_debug,
+            try:
+                mask, selection_debug = self.segment_object(frame, obj_key, prompt)
+                pts_cam, point_info = self.mask_to_points(frame.depth_m, frame.K, mask, return_info=True)
+                self.validate_point_info(obj_key, point_info)
+                T_obj_in_cam, _info = self.points_to_pose(
+                    pts_cam,
+                    is_anchor=(obj_key == self.cfg.anchor_key),
+                    anchor_center_cam=anchor_center,
                 )
-            debug["objects"][obj_key] = object_debug
+                if obj_key == self.cfg.anchor_key:
+                    anchor_center = T_obj_in_cam[:3, 3].copy()
+
+                kpts_local = self.points_to_local(pts_cam, T_obj_in_cam)
+                objs[obj_key] = ObjectState(
+                    T_in_cam=T_obj_in_cam.astype(np.float32),
+                    kpts_local=kpts_local.astype(np.float32),
+                )
+                object_debug = {
+                    "prompt": prompt,
+                    "T_in_cam": T_obj_in_cam.tolist(),
+                    "kpts_local_count": int(len(kpts_local)),
+                    "segmentation": selection_debug,
+                    "points": {k: v for k, v in point_info.items() if not k.startswith("_")},
+                    "saved_files": {},
+                }
+                if debug_path is not None:
+                    object_debug["saved_files"] = self.save_debug_images(
+                        debug_path,
+                        obj_key,
+                        frame.rgb,
+                        frame.depth_m,
+                        frame.K,
+                        mask,
+                        point_info,
+                        T_obj_in_cam,
+                        selection_debug,
+                    )
+                debug["objects"][obj_key] = object_debug
+            except Exception as exc:
+                debug["objects"][obj_key] = {
+                    "prompt": prompt,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+                if obj_key != self.cfg.anchor_key and self.cfg.allow_non_anchor_object_fallback:
+                    fallback = self.fallback_object_state(obj_key)
+                    if fallback is not None:
+                        objs[obj_key] = fallback
+                        debug["objects"][obj_key]["fallback_used"] = True
+                        debug["objects"][obj_key]["fallback_source"] = "dry_run_object_poses_cam"
+                        debug["objects"][obj_key]["T_in_cam"] = fallback.T_in_cam.tolist()
+                        debug["objects"][obj_key]["kpts_local_count"] = int(len(fallback.kpts_local))
+                        continue
+                raise
 
         return objs, debug
 

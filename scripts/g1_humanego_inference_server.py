@@ -61,6 +61,11 @@ def utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
+def request_run_dir(out_dir: Path, payload: dict[str, Any] | None) -> Path:
+    payload = payload or {}
+    return out_dir / safe_request_id(payload.get("request_id"))
+
+
 def decode_rgb_jpeg(payload: dict[str, Any]) -> np.ndarray:
     encoded = payload.get("rgb_jpeg_b64")
     if not encoded:
@@ -589,14 +594,35 @@ def make_handler(runtime: InferenceRuntime):
                 response = runtime.infer(payload)
                 self._send_json(200, response)
             except Exception as exc:
+                error_response = {
+                    "ok": False,
+                    "server_time_utc": datetime.now(timezone.utc).isoformat(),
+                    "request_id": None,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+                try:
+                    if "payload" in locals():
+                        error_response["request_id"] = payload.get("request_id")
+                        run_dir = request_run_dir(runtime.out_dir, payload)
+                        run_dir.mkdir(parents=True, exist_ok=True)
+                        summary = dict(payload)
+                        summary.pop("rgb_jpeg_b64", None)
+                        summary.pop("depth_m_npz_b64", None)
+                        (run_dir / "request_summary.json").write_text(
+                            json.dumps(json_safe(summary), ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        (run_dir / "response.json").write_text(
+                            json.dumps(json_safe(error_response), ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                except Exception:
+                    error_response["error_log_write_traceback"] = traceback.format_exc()
                 self._send_json(
                     500,
-                    {
-                        "ok": False,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                        "traceback": traceback.format_exc(),
-                    },
+                    error_response,
                 )
 
     return Handler

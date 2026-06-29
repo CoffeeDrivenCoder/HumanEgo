@@ -1596,6 +1596,8 @@ def main() -> int:
             }
         )
     except Exception as exc:
+        log(f"ERROR: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
         report.update(
             {
                 "ok": False,
