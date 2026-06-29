@@ -230,6 +230,7 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
     tracking_gate = step_record.get("tracking_gate") or {}
     control_result = step_record.get("control_result") or {}
     control_delta_pose = control_result.get("delta_pose") or {}
+    closed_loop = step_record.get("closed_loop_result") or {}
     return {
         "idx": step_record.get("idx"),
         "request_id": step_record.get("request_id"),
@@ -247,6 +248,13 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
         "delta_pose_action_data": control_delta_pose.get("action_data"),
         "delta_pose_rotation_vector_deg": control_delta_pose.get("rotation_vector_deg"),
         "delta_pose_rotation_frame": control_delta_pose.get("rotation_frame"),
+        "closed_loop_enabled": closed_loop.get("enabled"),
+        "closed_loop_reached": closed_loop.get("reached"),
+        "closed_loop_attempts": closed_loop.get("num_attempts"),
+        "closed_loop_final_position_error_m": closed_loop.get("final_position_error_m"),
+        "closed_loop_final_rotation_error_deg": closed_loop.get("final_rotation_error_deg"),
+        "closed_loop_orientation_mode": closed_loop.get("orientation_mode"),
+        "closed_loop_reason": closed_loop.get("reason"),
         "server_raw_delta_norm_m": (((response.get("policy_preview") or {}).get("sides") or {}).get("right") or [{}])[0].get("safety_translation_limit", {}).get("raw_delta_norm_m"),
         "server_clipped": (((response.get("policy_preview") or {}).get("sides") or {}).get("right") or [{}])[0].get("safety_translation_limit", {}).get("clipped"),
         "post_ee_delta_m": step_record.get("post_ee_delta_m"),
@@ -885,6 +893,177 @@ def call_ee_control_mode(
     raise ValueError(f"unknown EE control mode {mode!r}")
 
 
+def pose_error_report(current_T: np.ndarray, target_T: np.ndarray) -> dict[str, Any]:
+    current_T = np.asarray(current_T, dtype=np.float64).reshape(4, 4)
+    target_T = np.asarray(target_T, dtype=np.float64).reshape(4, 4)
+    translation_error = target_T[:3, 3] - current_T[:3, 3]
+    R_error_base = target_T[:3, :3] @ current_T[:3, :3].T
+    return {
+        "translation_error_m": translation_error.tolist(),
+        "position_error_m": float(np.linalg.norm(translation_error)),
+        "rotation_error_deg": rotation_angle_deg(R_error_base),
+        "rotation_vector_base_deg": rotation_vector_from_delta(R_error_base).tolist(),
+    }
+
+
+def reached_pose_tolerance(
+    error: dict[str, Any],
+    position_tolerance_m: float,
+    rotation_tolerance_deg: float,
+) -> bool:
+    position_ok = float(error["position_error_m"]) <= float(position_tolerance_m)
+    rotation_tolerance_deg = float(rotation_tolerance_deg)
+    if rotation_tolerance_deg < 0.0:
+        return position_ok
+    return position_ok and float(error["rotation_error_deg"]) <= rotation_tolerance_deg
+
+
+def call_ee_closed_loop_control(
+    controller: Any,
+    robot: Any,
+    state_adapter: Any,
+    target_pose: dict[str, float],
+    target_T_link7: np.ndarray,
+    side: str,
+    lifetime: float,
+    send_hz: float,
+    execute_s: float,
+    mode: str,
+    delta_pose_rotation_frame: str,
+    delta_pose_reference_time: float | None,
+    max_attempts: int,
+    position_tolerance_m: float,
+    rotation_tolerance_deg: float,
+    settle_s: float,
+    min_residual_m: float,
+    stop_on_regress: bool,
+    regress_patience: int,
+    orientation_mode: str,
+) -> dict[str, Any]:
+    target_T_link7 = np.asarray(target_T_link7, dtype=np.float64).reshape(4, 4)
+    attempts: list[dict[str, Any]] = []
+    started = time.time()
+    best_position_error = float("inf")
+    regress_streak = 0
+    reason = None
+    reached = False
+    max_attempts = max(1, int(max_attempts))
+
+    for attempt_idx in range(max_attempts):
+        before_T = state_adapter.get_T_link7_in_base()
+        before_error = pose_error_report(before_T, target_T_link7)
+        best_position_error = min(best_position_error, float(before_error["position_error_m"]))
+        if reached_pose_tolerance(before_error, position_tolerance_m, rotation_tolerance_deg):
+            reached = True
+            reason = "already_within_tolerance"
+            attempts.append({
+                "idx": attempt_idx,
+                "command_sent": False,
+                "before_error": before_error,
+                "after_error": before_error,
+                "reason": reason,
+            })
+            break
+        if float(before_error["position_error_m"]) < float(min_residual_m):
+            reason = "residual_below_min_command"
+            attempts.append({
+                "idx": attempt_idx,
+                "command_sent": False,
+                "before_error": before_error,
+                "after_error": before_error,
+                "reason": reason,
+            })
+            break
+
+        command_T_link7 = target_T_link7.copy()
+        if orientation_mode == "current":
+            command_T_link7[:3, :3] = before_T[:3, :3]
+        elif orientation_mode != "target":
+            raise ValueError(f"unknown closed-loop orientation mode {orientation_mode!r}; expected target/current")
+        command_pose = pose_dict_from_T(command_T_link7)
+
+        control_result = call_ee_control_mode(
+            controller,
+            robot,
+            command_pose,
+            before_T,
+            command_T_link7,
+            side,
+            lifetime,
+            send_hz,
+            execute_s,
+            mode,
+            delta_pose_rotation_frame,
+            delta_pose_reference_time,
+        )
+        if settle_s > 0.0:
+            time.sleep(float(settle_s))
+        after_T = state_adapter.get_T_link7_in_base()
+        after_error = pose_error_report(after_T, target_T_link7)
+        observed_delta = after_T[:3, 3] - before_T[:3, 3]
+        target_residual = np.asarray(before_error["translation_error_m"], dtype=np.float64)
+        tracking = translation_tracking_report(target_residual, observed_delta)
+        attempts.append({
+            "idx": attempt_idx,
+            "command_sent": True,
+            "before_T_link7_in_base": before_T.tolist(),
+            "command_T_link7_in_base": command_T_link7.tolist(),
+            "command_pose": command_pose,
+            "after_T_link7_in_base": after_T.tolist(),
+            "before_error": before_error,
+            "after_error": after_error,
+            "observed_delta_m": observed_delta.tolist(),
+            "observed_delta_norm_m": float(np.linalg.norm(observed_delta)),
+            "residual_translation_tracking": tracking,
+            "control_result": control_result,
+        })
+        if not control_result.get("ok"):
+            reason = "control_error"
+            break
+        if reached_pose_tolerance(after_error, position_tolerance_m, rotation_tolerance_deg):
+            reached = True
+            reason = "reached_tolerance"
+            break
+
+        current_position_error = float(after_error["position_error_m"])
+        if current_position_error + EPS < best_position_error:
+            best_position_error = current_position_error
+            regress_streak = 0
+        else:
+            regress_streak += 1
+        if stop_on_regress and regress_streak >= max(1, int(regress_patience)):
+            reason = "position_error_not_improving"
+            break
+
+    final_T = state_adapter.get_T_link7_in_base()
+    final_error = pose_error_report(final_T, target_T_link7)
+    if reached_pose_tolerance(final_error, position_tolerance_m, rotation_tolerance_deg):
+        reached = True
+        reason = reason or "reached_tolerance"
+    reason = reason or "max_attempts_exhausted"
+    return {
+        "enabled": True,
+        "ok": bool(attempts and all((not item.get("command_sent")) or (item.get("control_result") or {}).get("ok") for item in attempts)),
+        "reached": reached,
+        "reason": reason,
+        "num_attempts": len(attempts),
+        "num_commands": sum(1 for item in attempts if item.get("command_sent")),
+        "max_attempts": max_attempts,
+        "position_tolerance_m": float(position_tolerance_m),
+        "rotation_tolerance_deg": float(rotation_tolerance_deg),
+        "min_residual_m": float(min_residual_m),
+        "orientation_mode": orientation_mode,
+        "stop_on_regress": bool(stop_on_regress),
+        "regress_patience": int(regress_patience),
+        "duration_s": time.time() - started,
+        "final_T_link7_in_base": final_T.tolist(),
+        "final_position_error_m": final_error["position_error_m"],
+        "final_rotation_error_deg": final_error["rotation_error_deg"],
+        "final_error": final_error,
+        "attempts": attempts,
+    }
+
+
 def split_state_result(value: Any) -> tuple[Any, Any]:
     if isinstance(value, tuple) and len(value) == 2:
         return value[0], value[1]
@@ -1082,6 +1261,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ee-control-mode", choices=["absolute_pose", "delta_pose"], default="absolute_pose")
     parser.add_argument("--delta-pose-rotation-frame", choices=["base", "local"], default="base")
     parser.add_argument("--delta-pose-reference-time", type=float, default=None)
+    parser.add_argument("--closed-loop-ee", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--closed-loop-max-attempts", type=int, default=5)
+    parser.add_argument("--closed-loop-position-tolerance-m", type=float, default=0.01)
+    parser.add_argument("--closed-loop-rotation-tolerance-deg", type=float, default=-1.0)
+    parser.add_argument("--closed-loop-execute-s", type=float, default=None)
+    parser.add_argument("--closed-loop-settle-s", type=float, default=0.10)
+    parser.add_argument("--closed-loop-min-residual-m", type=float, default=0.002)
+    parser.add_argument("--closed-loop-orientation-mode", choices=["target", "current"], default="target")
+    parser.add_argument("--closed-loop-stop-on-regress", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--closed-loop-regress-patience", type=int, default=2)
     parser.add_argument("--execute-gripper", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gripper-source", choices=["model", "hold", "open", "closed", "manual"], default="model")
     parser.add_argument("--gripper-target", type=float, default=None)
@@ -1377,21 +1566,82 @@ def main() -> int:
                 report["steps"].append(step_record)
                 break
 
-            log(f"step {idx}: executing one EE target")
-            control_result = call_ee_control_mode(
-                arm.controller,
-                arm.robot,
-                target_pose,
-                before_T_link7,
-                target_T_link7,
-                args.side,
-                args.lifetime,
-                args.send_hz,
-                args.execute_s,
-                args.ee_control_mode,
-                args.delta_pose_rotation_frame,
-                args.delta_pose_reference_time,
-            )
+            if args.closed_loop_ee:
+                closed_loop_execute_s = (
+                    float(args.closed_loop_execute_s)
+                    if args.closed_loop_execute_s is not None
+                    else float(args.execute_s)
+                )
+                log(
+                    f"step {idx}: executing EE target with closed-loop residual tracking "
+                    f"max_attempts={args.closed_loop_max_attempts} "
+                    f"pos_tol={args.closed_loop_position_tolerance_m:.4f}m "
+                    f"rot_tol={args.closed_loop_rotation_tolerance_deg:.2f}deg"
+                )
+                closed_loop_result = call_ee_closed_loop_control(
+                    arm.controller,
+                    arm.robot,
+                    arm,
+                    target_pose,
+                    target_T_link7,
+                    args.side,
+                    args.lifetime,
+                    args.send_hz,
+                    closed_loop_execute_s,
+                    args.ee_control_mode,
+                    args.delta_pose_rotation_frame,
+                    args.delta_pose_reference_time,
+                    args.closed_loop_max_attempts,
+                    args.closed_loop_position_tolerance_m,
+                    args.closed_loop_rotation_tolerance_deg,
+                    args.closed_loop_settle_s,
+                    args.closed_loop_min_residual_m,
+                    args.closed_loop_stop_on_regress,
+                    args.closed_loop_regress_patience,
+                    args.closed_loop_orientation_mode,
+                )
+                control_attempts = [
+                    item for item in closed_loop_result.get("attempts", []) if item.get("command_sent")
+                ]
+                if control_attempts:
+                    control_result = control_attempts[-1].get("control_result") or {}
+                else:
+                    control_result = {
+                        "ok": bool(closed_loop_result.get("reached")),
+                        "mode": args.ee_control_mode,
+                        "send_mode": "closed_loop_no_command",
+                    }
+                control_result = dict(control_result)
+                control_result["closed_loop"] = {
+                    key: value
+                    for key, value in closed_loop_result.items()
+                    if key != "attempts"
+                }
+                step_record["closed_loop_result"] = closed_loop_result
+                log(
+                    f"step {idx}: closed-loop reached={closed_loop_result['reached']} "
+                    f"reason={closed_loop_result['reason']} "
+                    f"attempts={closed_loop_result['num_attempts']} "
+                    f"commands={closed_loop_result['num_commands']} "
+                    f"final_pos_err={closed_loop_result['final_position_error_m']:.4f}m "
+                    f"final_rot_err={closed_loop_result['final_rotation_error_deg']:.2f}deg"
+                )
+            else:
+                log(f"step {idx}: executing one EE target")
+                control_result = call_ee_control_mode(
+                    arm.controller,
+                    arm.robot,
+                    target_pose,
+                    before_T_link7,
+                    target_T_link7,
+                    args.side,
+                    args.lifetime,
+                    args.send_hz,
+                    args.execute_s,
+                    args.ee_control_mode,
+                    args.delta_pose_rotation_frame,
+                    args.delta_pose_reference_time,
+                )
             report["control_sent"] = True
             step_record["executed"] = bool(control_result.get("ok"))
             step_record["control_result"] = control_result
