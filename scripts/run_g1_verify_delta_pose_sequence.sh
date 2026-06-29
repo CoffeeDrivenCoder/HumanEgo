@@ -14,6 +14,7 @@ fi
 SESSION="${G1_ARTIFACT_SESSION:-$(date -u +%Y%m%d)}"
 OUT_DIR="${G1_DELTA_POSE_OUT_DIR:-./artifacts/g1_humanego/${SESSION}/diagnostics}"
 TAG="${G1_DELTA_POSE_TAG:-delta_pose_sequence}"
+CONTROL_MODE="${G1_DELTA_POSE_CONTROL_MODE:-auto}"
 CONFIRM="${G1_DELTA_POSE_CONFIRM:-}"
 SIDE="${G1_DELTA_POSE_SIDE:-right}"
 STEP_M="${G1_DELTA_POSE_STEP_M:-0.01}"
@@ -38,6 +39,7 @@ fi
 python3 scripts/g1_verify_delta_pose_sequence.py \
   --out-dir "$OUT_DIR" \
   --tag "$TAG" \
+  --control-mode "$CONTROL_MODE" \
   --confirm-control "$CONFIRM" \
   --side "$SIDE" \
   --step-m "$STEP_M" \

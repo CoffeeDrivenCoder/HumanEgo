@@ -208,6 +208,22 @@ def execute_sequence(args: argparse.Namespace, arm: Any, sequence: list[dict[str
             f"step {idx} {item['name']}: command trans={commanded_delta.tolist()} "
             f"norm={item['commanded_delta_norm_m']:.4f}m rot={target_rotation_delta_deg:.2f}deg"
         )
+        if args.control_mode == "prompt":
+            try:
+                operator = input("[Enter]=execute delta-pose step, s=skip, q=quit > ").strip().lower()
+            except EOFError:
+                operator = "q"
+            item["operator_input"] = operator
+            if operator == "q":
+                item["control_sent"] = False
+                item["blocked_reason"] = "operator_quit"
+                steps.append(item)
+                break
+            if operator == "s":
+                item["control_sent"] = False
+                item["blocked_reason"] = "operator_skip"
+                steps.append(item)
+                continue
         if args.confirm_control != "RUN_CONTROL":
             item["control_sent"] = False
             item["blocked_reason"] = "missing RUN_CONTROL confirmation"
@@ -241,11 +257,29 @@ def execute_sequence(args: argparse.Namespace, arm: Any, sequence: list[dict[str
         ).tolist()
         item["rotation_error_deg_abs"] = abs(item["observed_rotation_delta_deg"] - target_rotation_delta_deg)
         item["return_to_start_delta_m"] = (after_T[:3, 3] - start_T[:3, 3]).tolist()
+        translation_ratio = (
+            item["observed_delta_norm_m"] / item["commanded_delta_norm_m"]
+            if item["commanded_delta_norm_m"] > EPS
+            else None
+        )
+        translation_cos = item["translation_tracking"].get("cosine_to_target_delta")
         log(
             f"step {idx} {item['name']}: observed trans={observed_delta.tolist()} "
             f"norm={item['observed_delta_norm_m']:.4f}m "
-            f"cos={item['translation_tracking'].get('cosine_to_target_delta')} "
+            f"ratio={translation_ratio} "
+            f"cos={translation_cos} "
             f"rot={item['observed_rotation_delta_deg']:.2f}deg"
+        )
+        print(
+            "RESULT "
+            f"step={idx} name={item['name']} "
+            f"target_trans={item['commanded_delta_norm_m']:.4f}m "
+            f"actual_trans={item['observed_delta_norm_m']:.4f}m "
+            f"ratio={translation_ratio if translation_ratio is not None else 'n/a'} "
+            f"cos={translation_cos if translation_cos is not None else 'n/a'} "
+            f"target_rot={target_rotation_delta_deg:.2f}deg "
+            f"actual_rot={item['observed_rotation_delta_deg']:.2f}deg "
+            f"rot_abs_err={item['rotation_error_deg_abs']:.2f}deg"
         )
         steps.append(item)
         if not control.get("ok"):
@@ -262,6 +296,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", default=str(artifact_dir("diagnostics")))
     parser.add_argument("--tag", default="delta_pose_sequence")
     parser.add_argument("--side", choices=["right", "left"], default="right")
+    parser.add_argument("--control-mode", choices=["auto", "prompt"], default="auto")
     parser.add_argument("--confirm-control", default="")
     parser.add_argument("--step-m", type=float, default=0.01)
     parser.add_argument("--rot-deg", type=float, default=5.0)

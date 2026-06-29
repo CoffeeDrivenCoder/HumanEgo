@@ -1,0 +1,22 @@
+[
+  {"name": "01_forward_x", "translation_m": [0.010, 0.000, 0.000], "rotation_axis": "z", "rotation_deg": 2.0},
+  {"name": "02_left_y", "translation_m": [0.000, 0.010, 0.000], "rotation_axis": "x", "rotation_deg": 2.0},
+  {"name": "03_down_z", "translation_m": [0.000, 0.000, -0.010], "rotation_axis": "z", "rotation_deg": -2.0},
+  {"name": "04_back_x", "translation_m": [-0.010, 0.000, 0.000], "rotation_axis": "x", "rotation_deg": -2.0},
+  {"name": "05_right_y", "translation_m": [0.000, -0.010, 0.000], "rotation_axis": "z", "rotation_deg": 2.0},
+  {"name": "06_up_z", "translation_m": [0.000, 0.000, 0.010], "rotation_axis": "x", "rotation_deg": 2.0},
+  {"name": "07_diag_xy", "translation_m": [0.007, 0.007, 0.000], "rotation_axis": "z", "rotation_deg": -3.0},
+  {"name": "08_diag_return_xy", "translation_m": [-0.007, -0.007, 0.000], "rotation_axis": "z", "rotation_deg": 3.0},
+  {"name": "09_diag_xz", "translation_m": [0.007, 0.000, -0.007], "rotation_axis": "x", "rotation_deg": -3.0},
+  {"name": "10_diag_return_xz", "translation_m": [-0.007, 0.000, 0.007], "rotation_axis": "x", "rotation_deg": 3.0},
+  {"name": "11_rot_x_pos", "translation_m": [0.000, 0.000, 0.000], "rotation_axis": "x", "rotation_deg": 5.0},
+  {"name": "12_rot_x_neg", "translation_m": [0.000, 0.000, 0.000], "rotation_axis": "x", "rotation_deg": -5.0},
+  {"name": "13_rot_y_pos", "translation_m": [0.000, 0.000, 0.000], "rotation_axis": "y", "rotation_deg": 5.0},
+  {"name": "14_rot_y_neg", "translation_m": [0.000, 0.000, 0.000], "rotation_axis": "y", "rotation_deg": -5.0},
+  {"name": "15_rot_z_pos", "translation_m": [0.000, 0.000, 0.000], "rotation_axis": "z", "rotation_deg": 5.0},
+  {"name": "16_rot_z_neg", "translation_m": [0.000, 0.000, 0.000], "rotation_axis": "z", "rotation_deg": -5.0},
+  {"name": "17_small_approach", "translation_m": [0.008, -0.004, -0.004], "rotation_axis": "z", "rotation_deg": 3.0},
+  {"name": "18_small_retreat", "translation_m": [-0.008, 0.004, 0.004], "rotation_axis": "z", "rotation_deg": -3.0},
+  {"name": "19_mixed_pose", "translation_m": [0.005, 0.005, -0.005], "rotation_axis": "x", "rotation_deg": 4.0},
+  {"name": "20_mixed_return", "translation_m": [-0.005, -0.005, 0.005], "rotation_axis": "x", "rotation_deg": -4.0}
+]
