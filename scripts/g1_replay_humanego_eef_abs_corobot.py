@@ -298,6 +298,39 @@ def call_corobot_action(urls: list[str], action: dict[str, Any], timeout_s: floa
     return {"ok": False, "attempts": attempts}
 
 
+def call_corobot_env_action(action: dict[str, Any], wait_action_time: float) -> dict[str, Any]:
+    started = time.time()
+    env = None
+    try:
+        from corobot.envs.g01_env import G01Env
+
+        env = G01Env()
+        setup_result = env.setup()
+        execute_result = env.execute_action(action, wait_action_time=float(wait_action_time))
+        return {
+            "ok": True,
+            "executor": "corobot_env",
+            "duration_s": time.time() - started,
+            "setup_result": json_safe(setup_result),
+            "execute_result": json_safe(execute_result),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "executor": "corobot_env",
+            "duration_s": time.time() - started,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+    finally:
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
+
+
 def evaluate_final_tracking(
     start_T: np.ndarray | None,
     final_T: np.ndarray | None,
@@ -335,6 +368,7 @@ def main() -> int:
     parser.add_argument("--side", choices=["right", "left"], default="right")
     parser.add_argument("--control-mode", choices=["dry-run", "prompt", "auto"], default="prompt")
     parser.add_argument("--confirm-control", default="")
+    parser.add_argument("--executor", choices=["corobot_env", "http"], default="corobot_env")
     parser.add_argument("--max-actions", type=int, default=10)
     parser.add_argument("--duration-s", type=float, default=2.0)
     parser.add_argument("--settle-s", type=float, default=1.0)
@@ -417,9 +451,13 @@ def main() -> int:
         elif args.confirm_control != "RUN_CONTROL":
             report["blocked_reason"] = "missing RUN_CONTROL confirmation"
         else:
-            urls = [args.corobot_action_url] if args.corobot_action_url else list(DEFAULT_COROBOT_URLS)
-            log(f"posting CoRobot EEF_ABS action to candidate urls: {urls}")
-            control_result = call_corobot_action(urls, action, args.corobot_timeout_s)
+            if args.executor == "corobot_env":
+                log("executing CoRobot EEF_ABS action via corobot.envs.g01_env.G01Env.execute_action")
+                control_result = call_corobot_env_action(action, args.duration_s)
+            else:
+                urls = [args.corobot_action_url] if args.corobot_action_url else list(DEFAULT_COROBOT_URLS)
+                log(f"posting CoRobot EEF_ABS action to candidate urls: {urls}")
+                control_result = call_corobot_action(urls, action, args.corobot_timeout_s)
             report["control_sent"] = bool(control_result.get("ok"))
             report["control_result"] = control_result
             if control_result.get("ok"):

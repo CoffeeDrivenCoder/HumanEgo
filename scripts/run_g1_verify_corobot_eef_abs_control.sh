@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Replay recorded HumanEgo link7 targets through a CoRobot-style EEF_ABS action.
-# This requires a robot-side CoRobot endpoint that accepts raw action JSON.
+# Direct CoRobot G01Env EEF_ABS control probe.
+# Modes:
+#   G1_EEF_ABS_MODE=hold  keeps current link7 pose
+#   G1_EEF_ABS_MODE=move  moves a small interpolated absolute-pose trajectory
 
 cd "$(dirname "$0")/.."
 
@@ -12,42 +14,35 @@ fi
 
 SESSION="${G1_ARTIFACT_SESSION:-$(date -u +%Y%m%d)}"
 OUT_DIR="${G1_EEF_ABS_OUT_DIR:-./artifacts/g1_humanego/${SESSION}/diagnostics}"
-TAG="${G1_EEF_ABS_TAG:-humanego_eef_abs_corobot_replay}"
+TAG="${G1_EEF_ABS_TAG:-corobot_eef_abs_verify}"
 SIDE="${G1_EEF_ABS_SIDE:-right}"
+MODE="${G1_EEF_ABS_MODE:-hold}"
 CONTROL_MODE="${G1_EEF_ABS_CONTROL_MODE:-prompt}"
 CONFIRM="${G1_EEF_ABS_CONFIRM:-}"
-EXECUTOR="${G1_EEF_ABS_EXECUTOR:-corobot_env}"
-MAX_ACTIONS="${G1_EEF_ABS_MAX_ACTIONS:-10}"
+DELTA_AXIS="${G1_EEF_ABS_DELTA_AXIS:-z}"
+DELTA_M="${G1_EEF_ABS_DELTA_M:--0.01}"
+ROTATION_AXIS="${G1_EEF_ABS_ROTATION_AXIS:-z}"
+ROTATION_DEG="${G1_EEF_ABS_ROTATION_DEG:-0.0}"
+NUM_POINTS="${G1_EEF_ABS_NUM_POINTS:-30}"
 DURATION_S="${G1_EEF_ABS_DURATION_S:-2.0}"
 SETTLE_S="${G1_EEF_ABS_SETTLE_S:-1.0}"
-COROBOT_ACTION_URL="${G1_EEF_ABS_COROBOT_ACTION_URL:-}"
-COROBOT_TIMEOUT_S="${G1_EEF_ABS_COROBOT_TIMEOUT_S:-10}"
 UPLOAD_URL="${G1_EEF_ABS_UPLOAD_URL:-${G1_DIAG_UPLOAD_URL:-}}"
 UPLOAD_TIMEOUT_S="${G1_EEF_ABS_UPLOAD_TIMEOUT_S:-20}"
 
-if [[ $# -lt 1 ]]; then
-  echo "usage: $0 <interactive_step_report.json | humanego_action_replay_sequence.json | run_dir> [extra args]" >&2
-  exit 2
-fi
-
-COROBOT_URL_ARGS=()
-if [[ -n "$COROBOT_ACTION_URL" ]]; then
-  COROBOT_URL_ARGS=(--corobot-action-url "$COROBOT_ACTION_URL")
-fi
-
-python3 scripts/g1_replay_humanego_eef_abs_corobot.py \
-  "$1" \
+python3 scripts/g1_verify_corobot_eef_abs_control.py \
   --out-dir "$OUT_DIR" \
   --tag "$TAG" \
   --side "$SIDE" \
+  --mode "$MODE" \
   --control-mode "$CONTROL_MODE" \
   --confirm-control "$CONFIRM" \
-  --executor "$EXECUTOR" \
-  --max-actions "$MAX_ACTIONS" \
+  --delta-axis "$DELTA_AXIS" \
+  --delta-m "$DELTA_M" \
+  --rotation-axis "$ROTATION_AXIS" \
+  --rotation-deg "$ROTATION_DEG" \
+  --num-points "$NUM_POINTS" \
   --duration-s "$DURATION_S" \
   --settle-s "$SETTLE_S" \
-  "${COROBOT_URL_ARGS[@]}" \
-  --corobot-timeout-s "$COROBOT_TIMEOUT_S" \
   --upload-url "$UPLOAD_URL" \
   --upload-timeout-s "$UPLOAD_TIMEOUT_S" \
-  "${@:2}"
+  "$@"
