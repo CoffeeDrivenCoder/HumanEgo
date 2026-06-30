@@ -34,7 +34,11 @@ for path in (PROJECT_ROOT, PROJECT_ROOT / "inference", PROJECT_ROOT / "scripts")
 from g1_artifacts import artifact_dir, run_dir as artifact_run_dir  # noqa: E402
 from g1_humanego_client_dry_run import json_safe, log, upload_zip  # noqa: E402
 from g1_humanego_interactive_step_client import rotation_angle_deg, translation_tracking_report  # noqa: E402
-from g1_replay_humanego_eef_abs_corobot import extract_targets, load_json, matrix_from_any, row_from_T  # noqa: E402
+from g1_replay_humanego_eef_abs_corobot import (  # noqa: E402
+    extract_targets,
+    matrix_from_any,
+    row_from_T,
+)
 from g1_verify_abs_pose_sequence import (  # noqa: E402
     call_abs_pose_trajectory_once,
     evaluate_motion,
@@ -45,6 +49,7 @@ from g1_verify_abs_pose_sequence import (  # noqa: E402
 
 
 EPS = 1e-12
+TARGET_MODES = ("full", "position_only", "orientation_only")
 
 
 def utc_stamp() -> str:
@@ -60,6 +65,30 @@ def make_zip(src_dir: Path) -> Path:
             if path.is_file():
                 zf.write(path, path.relative_to(src_dir.parent))
     return zip_path
+
+
+def load_replay_json(path: str) -> Any:
+    p = Path(path).expanduser().resolve()
+    if p.is_dir():
+        candidates = [
+            p / "humanego_abs_pose_replay_targets.json",
+            p / "humanego_abs_pose_replay_report.json",
+            p / "humanego_action_replay_sequence.json",
+            p / "interactive_step_report.json",
+            p / "autoregressive_rollout.json",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                p = candidate
+                break
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        data["_path"] = str(p)
+    elif isinstance(data, list):
+        data = {"targets": data, "_path": str(p)}
+    else:
+        raise ValueError(f"expected JSON object or list in {p}, got {type(data).__name__}")
+    return data
 
 
 def compare_to_recorded_before(target: dict[str, Any], replay_before_T: np.ndarray, target_T: np.ndarray) -> dict[str, Any]:
@@ -92,6 +121,58 @@ def compare_to_recorded_before(target: dict[str, Any], replay_before_T: np.ndarr
     return out
 
 
+def command_target_from_model(before_T: np.ndarray, model_target_T: np.ndarray, target_mode: str) -> np.ndarray:
+    before_T = np.asarray(before_T, dtype=np.float64).reshape(4, 4)
+    model_target_T = np.asarray(model_target_T, dtype=np.float64).reshape(4, 4)
+    if target_mode == "full":
+        return model_target_T.copy()
+    command_T = before_T.copy()
+    if target_mode == "position_only":
+        command_T[:3, 3] = model_target_T[:3, 3]
+        return command_T
+    if target_mode == "orientation_only":
+        command_T[:3, :3] = model_target_T[:3, :3]
+        return command_T
+    raise ValueError(f"unknown target_mode {target_mode!r}; expected one of {TARGET_MODES}")
+
+
+def normalize_target_item(item: dict[str, Any], *, side: str, seq_idx: int) -> dict[str, Any] | None:
+    T_raw = item.get("target_T_link7_in_base") or item.get("model_target_T_link7_in_base")
+    if T_raw is None:
+        return None
+    out = dict(item)
+    out["seq_idx"] = out.get("seq_idx", seq_idx)
+    out["side"] = out.get("side") or side
+    out["target_T_link7_in_base"] = matrix_from_any(T_raw, "target_T_link7_in_base").tolist()
+    before_raw = out.get("before_T_link7_in_base")
+    if before_raw is not None:
+        out["before_T_link7_in_base"] = matrix_from_any(before_raw, "before_T_link7_in_base").tolist()
+    return out
+
+
+def extract_replay_targets(data: Any, *, side: str, max_actions: int) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        candidates = data
+    elif isinstance(data, dict) and isinstance(data.get("targets"), list):
+        candidates = data["targets"]
+    else:
+        return extract_targets(data, side=side, max_actions=max_actions)
+
+    targets: list[dict[str, Any]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        normalized = normalize_target_item(item, side=side, seq_idx=len(targets))
+        if normalized is None:
+            continue
+        targets.append(normalized)
+        if max_actions > 0 and len(targets) >= max_actions:
+            break
+    if not targets:
+        raise RuntimeError("no target_T_link7_in_base entries found in replay target list")
+    return targets
+
+
 def build_step_summary(step: dict[str, Any]) -> dict[str, Any]:
     tracking = ((step.get("tracking") or {}).get("translation_tracking") or {})
     inactive_tracking = step.get("inactive_tracking") or {}
@@ -101,16 +182,23 @@ def build_step_summary(step: dict[str, Any]) -> dict[str, Any]:
         "idx": step.get("idx"),
         "online_step_idx": step.get("online_step_idx"),
         "request_id": step.get("request_id"),
+        "target_mode": step.get("target_mode"),
         "control_sent": step.get("control_sent"),
         "control_ok": (step.get("control_result") or {}).get("ok"),
         "target_delta_norm_m": (step.get("tracking") or {}).get("commanded_delta_norm_m"),
+        "model_target_delta_norm_m": step.get("model_target_delta_from_current_norm_m"),
+        "command_target_delta_norm_m": step.get("command_target_delta_from_current_norm_m"),
         "actual_delta_norm_m": (step.get("tracking") or {}).get("observed_delta_norm_m"),
         "translation_ratio": tracking.get("norm_ratio"),
         "translation_cosine": tracking.get("cosine_to_target_delta"),
         "final_pose_position_error_m": (step.get("tracking") or {}).get("final_pose_position_error_m"),
         "target_rotation_delta_deg": (step.get("tracking") or {}).get("target_rotation_delta_deg"),
+        "model_target_rotation_delta_deg": step.get("model_target_rotation_from_current_deg"),
+        "command_target_rotation_delta_deg": step.get("command_target_rotation_from_current_deg"),
         "actual_rotation_delta_deg": (step.get("tracking") or {}).get("observed_rotation_delta_deg"),
         "final_pose_rotation_error_deg": (step.get("tracking") or {}).get("final_pose_rotation_error_deg"),
+        "final_model_pose_position_error_m": step.get("final_model_pose_position_error_m"),
+        "final_model_pose_rotation_error_deg": step.get("final_model_pose_rotation_error_deg"),
         "inactive_drift_m": inactive_tracking.get("observed_delta_norm_m"),
         "inactive_rotation_deg": inactive_tracking.get("observed_rotation_delta_deg"),
         "recorded_before_position_difference_m": recorded_compare.get("before_pose_position_difference_m"),
@@ -137,7 +225,7 @@ def execute_replay(args: argparse.Namespace, arm: Any, targets: list[dict[str, A
     summaries_jsonl_path = run_dir / "step_summaries.jsonl"
 
     for idx, target in enumerate(targets):
-        target_T = matrix_from_any(target["target_T_link7_in_base"], "target_T_link7_in_base")
+        model_target_T = matrix_from_any(target["target_T_link7_in_base"], "target_T_link7_in_base")
         before_T = arm.get_T_link7_in_base()
         inactive_before_T = read_link7_T_from_motion_status(
             arm.controller,
@@ -147,41 +235,57 @@ def execute_replay(args: argparse.Namespace, arm: Any, targets: list[dict[str, A
             wait_motion_status,
             parse_motion_pose,
         )
-        target_Ts = interpolate_Ts(before_T, target_T, args.interp_points)
+        command_target_T = command_target_from_model(before_T, model_target_T, args.target_mode)
+        target_Ts = interpolate_Ts(before_T, command_target_T, args.interp_points)
         active_rows = [row_from_T(T) for T in target_Ts]
         inactive_target_Ts = [inactive_before_T.copy() for _ in target_Ts]
         inactive_rows = [row_from_T(T) for T in inactive_target_Ts]
-        target_delta = target_T[:3, 3] - before_T[:3, 3]
-        target_rot = rotation_angle_deg(target_T[:3, :3] @ before_T[:3, :3].T)
+        model_target_delta = model_target_T[:3, 3] - before_T[:3, 3]
+        command_target_delta = command_target_T[:3, 3] - before_T[:3, 3]
+        model_target_rot = rotation_angle_deg(model_target_T[:3, :3] @ before_T[:3, :3].T)
+        command_target_rot = rotation_angle_deg(command_target_T[:3, :3] @ before_T[:3, :3].T)
         item: dict[str, Any] = {
             "idx": idx,
             "online_step_idx": target.get("online_step_idx"),
             "request_id": target.get("request_id"),
+            "target_mode": args.target_mode,
             "side": args.side,
             "inactive_side": inactive_side,
             "source_target": target,
             "before_T_link7_in_base": before_T.tolist(),
-            "target_T_link7_in_base": target_T.tolist(),
+            "model_target_T_link7_in_base": model_target_T.tolist(),
+            "command_target_T_link7_in_base": command_target_T.tolist(),
+            "target_T_link7_in_base": command_target_T.tolist(),
             "inactive_before_T_link7_in_base": inactive_before_T.tolist(),
             "num_interpolation_points": len(active_rows),
             "trajectory_reference_time": args.reference_time,
-            "target_delta_from_current_m": target_delta.tolist(),
-            "target_delta_from_current_norm_m": float(np.linalg.norm(target_delta)),
-            "target_rotation_from_current_deg": target_rot,
-            "recorded_before_compare": compare_to_recorded_before(target, before_T, target_T),
+            "model_target_delta_from_current_m": model_target_delta.tolist(),
+            "model_target_delta_from_current_norm_m": float(np.linalg.norm(model_target_delta)),
+            "model_target_rotation_from_current_deg": model_target_rot,
+            "command_target_delta_from_current_m": command_target_delta.tolist(),
+            "command_target_delta_from_current_norm_m": float(np.linalg.norm(command_target_delta)),
+            "command_target_rotation_from_current_deg": command_target_rot,
+            "target_delta_from_current_m": command_target_delta.tolist(),
+            "target_delta_from_current_norm_m": float(np.linalg.norm(command_target_delta)),
+            "target_rotation_from_current_deg": command_target_rot,
+            "recorded_before_compare": compare_to_recorded_before(target, before_T, model_target_T),
             "online_observed": target.get("online_observed") or {},
         }
         log(
             f"ABS_POSE replay step {idx} online_step={target.get('online_step_idx')}: "
-            f"target_delta_norm={item['target_delta_from_current_norm_m']:.4f}m "
-            f"target_rot={target_rot:.2f}deg rows={len(active_rows)}"
+            f"mode={args.target_mode} "
+            f"command_delta_norm={item['command_target_delta_from_current_norm_m']:.4f}m "
+            f"command_rot={command_target_rot:.2f}deg rows={len(active_rows)}"
         )
         print(
             "\n=== ABS_POSE replay step "
             f"{idx}/{len(targets) - 1} ===\n"
             f"online_step: {target.get('online_step_idx')}\n"
-            f"target_delta_m: {target_delta.tolist()} norm={item['target_delta_from_current_norm_m']:.4f}\n"
-            f"target_rotation_delta_deg: {target_rot:.2f}\n"
+            f"target_mode: {args.target_mode}\n"
+            f"model_delta_m: {model_target_delta.tolist()} norm={item['model_target_delta_from_current_norm_m']:.4f}\n"
+            f"model_rotation_delta_deg: {model_target_rot:.2f}\n"
+            f"command_delta_m: {command_target_delta.tolist()} norm={item['command_target_delta_from_current_norm_m']:.4f}\n"
+            f"command_rotation_delta_deg: {command_target_rot:.2f}\n"
             f"interp_points: {len(active_rows)} reference_time={args.reference_time:.3f}s\n"
         )
 
@@ -239,8 +343,10 @@ def execute_replay(args: argparse.Namespace, arm: Any, targets: list[dict[str, A
         )
         item["after_T_link7_in_base"] = after_T.tolist()
         item["inactive_after_T_link7_in_base"] = inactive_after_T.tolist()
-        item["tracking"] = evaluate_motion(before_T, target_T, after_T)
+        item["tracking"] = evaluate_motion(before_T, command_target_T, after_T)
         item["inactive_tracking"] = evaluate_motion(inactive_before_T, inactive_before_T, inactive_after_T)
+        item["final_model_pose_position_error_m"] = float(np.linalg.norm(model_target_T[:3, 3] - after_T[:3, 3]))
+        item["final_model_pose_rotation_error_deg"] = rotation_angle_deg(model_target_T[:3, :3] @ after_T[:3, :3].T)
         tracking = item["tracking"]["translation_tracking"]
         inactive_tracking = item["inactive_tracking"]
         summary = build_step_summary(item)
@@ -250,6 +356,7 @@ def execute_replay(args: argparse.Namespace, arm: Any, targets: list[dict[str, A
         print(
             "RESULT "
             f"step={idx} online_step={target.get('online_step_idx')} "
+            f"mode={args.target_mode} "
             f"target_trans={item['tracking']['commanded_delta_norm_m']:.4f}m "
             f"actual_trans={item['tracking']['observed_delta_norm_m']:.4f}m "
             f"ratio={tracking.get('norm_ratio')} "
@@ -294,6 +401,7 @@ def main() -> int:
     parser.add_argument("--control-mode", choices=["prompt", "auto", "dry-run"], default="prompt")
     parser.add_argument("--confirm-control", default="")
     parser.add_argument("--max-actions", type=int, default=10)
+    parser.add_argument("--target-mode", choices=TARGET_MODES, default="full")
     parser.add_argument("--interp-points", type=int, default=30)
     parser.add_argument("--reference-time", type=float, default=2.0)
     parser.add_argument("--execute-s", type=float, default=2.0)
@@ -302,8 +410,8 @@ def main() -> int:
     parser.add_argument("--upload-timeout-s", type=float, default=20.0)
     args = parser.parse_args()
 
-    source = load_json(args.trajectory_json)
-    targets = extract_targets(source, side=args.side, max_actions=args.max_actions)
+    source = load_replay_json(args.trajectory_json)
+    targets = extract_replay_targets(source, side=args.side, max_actions=args.max_actions)
     out_base = Path(args.out_dir).expanduser().resolve()
     default_base = artifact_dir("diagnostics")
     if out_base == default_base:
@@ -322,8 +430,8 @@ def main() -> int:
         "note": (
             "Replays recorded HumanEgo target_T_link7_in_base values through direct "
             "G1 SDK trajectory_tracking_control ABS_POSE. Each model target is "
-            "interpolated from current measured link7 pose; inactive arm is held "
-            "at its current ABS_POSE target."
+            "converted according to --target-mode, then interpolated from current "
+            "measured link7 pose; inactive arm is held at its current ABS_POSE target."
         ),
     }
     targets_path = run_dir / "humanego_abs_pose_replay_targets.json"
@@ -336,6 +444,7 @@ def main() -> int:
             "\n=== HumanEgo ABS_POSE SDK replay preview ===\n"
             f"source: {source.get('_path')}\n"
             f"side: {args.side}\n"
+            f"target_mode: {args.target_mode}\n"
             f"targets: {len(targets)}\n"
             f"interp_points_per_target: {args.interp_points}\n"
             f"reference_time_per_target: {args.reference_time:.3f}s\n"

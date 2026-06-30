@@ -27,6 +27,7 @@ SIDE="${G1_ABS_POSE_REPLAY_SIDE:-right}"
 CONTROL_MODE="${G1_ABS_POSE_REPLAY_CONTROL_MODE:-prompt}"
 CONFIRM="${G1_ABS_POSE_REPLAY_CONFIRM:-}"
 MAX_ACTIONS="${G1_ABS_POSE_REPLAY_MAX_ACTIONS:-10}"
+TARGET_MODE="${G1_ABS_POSE_REPLAY_TARGET_MODE:-full}"
 INTERP_POINTS="${G1_ABS_POSE_REPLAY_INTERP_POINTS:-30}"
 REFERENCE_TIME="${G1_ABS_POSE_REPLAY_REFERENCE_TIME:-2.0}"
 EXECUTE_S="${G1_ABS_POSE_REPLAY_EXECUTE_S:-2.0}"
@@ -41,6 +42,7 @@ python3 scripts/g1_replay_humanego_abs_pose_sequence.py "$SOURCE" \
   --control-mode "$CONTROL_MODE" \
   --confirm-control "$CONFIRM" \
   --max-actions "$MAX_ACTIONS" \
+  --target-mode "$TARGET_MODE" \
   --interp-points "$INTERP_POINTS" \
   --reference-time "$REFERENCE_TIME" \
   --execute-s "$EXECUTE_S" \
