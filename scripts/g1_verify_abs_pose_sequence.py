@@ -89,26 +89,60 @@ def interpolate_Ts(start_T: np.ndarray, target_T: np.ndarray, num_points: int) -
     return out
 
 
+def opposite_side(side: str) -> str:
+    if side == "right":
+        return "left"
+    if side == "left":
+        return "right"
+    raise ValueError(f"unknown side {side!r}")
+
+
+def read_link7_T_from_motion_status(
+    controller: Any,
+    side: str,
+    tries: int,
+    sleep_s: float,
+    wait_motion_status_fn: Any,
+    parse_motion_pose_fn: Any,
+) -> np.ndarray:
+    status = wait_motion_status_fn(controller, tries, sleep_s)
+    if not isinstance(status, dict):
+        raise RuntimeError(f"get_motion_status did not return a dict: {status!r}")
+    frames = status.get("frames") or {}
+    frame_name = f"arm_{side}_link7"
+    if frame_name not in frames:
+        raise RuntimeError(f"{frame_name} not in motion_status frames: {sorted(frames.keys())}")
+    return parse_motion_pose_fn(frames[frame_name])
+
+
 def call_abs_pose_trajectory_once(
     controller: Any,
     robot: Any,
     side: str,
-    rows: list[list[float]],
+    active_rows: list[list[float]],
+    inactive_rows: list[list[float]],
     reference_time: float,
 ) -> dict[str, Any]:
+    if len(active_rows) != len(inactive_rows):
+        raise ValueError(f"active_rows and inactive_rows length mismatch: {len(active_rows)} != {len(inactive_rows)}")
+    if not active_rows:
+        raise ValueError("active_rows is empty")
+
     joint_states = read_robot_joint_states_for_trajectory(robot)
-    zero = [[0.0] * 6 for _ in rows]
     robot_actions = []
-    for idx, row in enumerate(rows):
-        action_data = [float(v) for v in row]
+    for idx, row in enumerate(active_rows):
+        active_action_data = [float(v) for v in row]
+        inactive_action_data = [float(v) for v in inactive_rows[idx]]
+        left_action_data = active_action_data if side == "left" else inactive_action_data
+        right_action_data = active_action_data if side == "right" else inactive_action_data
         robot_actions.append(
             {
                 "left_arm": {
-                    "action_data": action_data if side == "left" else zero[idx],
+                    "action_data": left_action_data,
                     "control_type": "ABS_POSE",
                 },
                 "right_arm": {
-                    "action_data": action_data if side == "right" else zero[idx],
+                    "action_data": right_action_data,
                     "control_type": "ABS_POSE",
                 },
             }
@@ -205,30 +239,63 @@ def main() -> int:
     }
     arm = None
     try:
-        from G1RobotArm import G1RobotArmReadOnly
+        from G1RobotArm import G1RobotArmReadOnly, parse_motion_pose, wait_motion_status
 
         arm = G1RobotArmReadOnly(side=args.side)
+        inactive_side = opposite_side(args.side)
         before_T = arm.get_T_link7_in_base()
+        inactive_before_T = read_link7_T_from_motion_status(
+            arm.controller,
+            inactive_side,
+            arm.motion_tries,
+            arm.motion_sleep_s,
+            wait_motion_status,
+            parse_motion_pose,
+        )
         if args.mode == "hold":
             target_T = before_T.copy()
         else:
             target_T = target_from_delta(before_T, args.delta_axis, args.delta_m, args.rotation_axis, args.rotation_deg)
         target_Ts = interpolate_Ts(before_T, target_T, args.num_points)
         rows = [row_from_T(T) for T in target_Ts]
+        inactive_target_Ts = [inactive_before_T.copy() for _ in target_Ts]
+        inactive_rows = [row_from_T(T) for T in inactive_target_Ts]
         report.update(
             {
+                "active_side": args.side,
+                "inactive_side": inactive_side,
                 "before_T_link7_in_base": before_T.tolist(),
                 "target_T_link7_in_base": target_T.tolist(),
                 "rows": rows,
                 "target_Ts_link7_in_base": [T.tolist() for T in target_Ts],
+                "inactive_before_T_link7_in_base": inactive_before_T.tolist(),
+                "inactive_hold_T_link7_in_base": inactive_before_T.tolist(),
+                "inactive_rows": inactive_rows,
+                "inactive_target_Ts_link7_in_base": [T.tolist() for T in inactive_target_Ts],
+                "inactive_note": "Inactive arm receives repeated current ABS_POSE hold rows; ABS_POSE zero rows are never used.",
             }
         )
         rows_path = run_dir / "abs_pose_rows.json"
-        rows_path.write_text(json.dumps(json_safe(rows), ensure_ascii=False, indent=2), encoding="utf-8")
+        rows_path.write_text(
+            json.dumps(
+                json_safe(
+                    {
+                        "active_side": args.side,
+                        "inactive_side": inactive_side,
+                        "active_rows": rows,
+                        "inactive_hold_rows": inactive_rows,
+                    }
+                ),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         print(
             "\n=== G1 ABS_POSE trajectory_tracking_control probe ===\n"
             f"mode: {args.mode}\n"
             f"side: {args.side}\n"
+            f"inactive_side_hold: {inactive_side}\n"
             f"rows: {len(rows)}\n"
             f"reference_time: {args.reference_time:.3f}\n"
             f"target_delta_m: {(target_T[:3, 3] - before_T[:3, 3]).tolist()}\n"
@@ -255,6 +322,7 @@ def main() -> int:
                 arm.robot,
                 args.side,
                 rows,
+                inactive_rows,
                 args.reference_time,
             )
             report["control_sent"] = True
@@ -264,9 +332,20 @@ def main() -> int:
             if args.settle_s > 0.0:
                 time.sleep(max(0.0, float(args.settle_s)))
             after_T = arm.get_T_link7_in_base()
+            inactive_after_T = read_link7_T_from_motion_status(
+                arm.controller,
+                inactive_side,
+                arm.motion_tries,
+                arm.motion_sleep_s,
+                wait_motion_status,
+                parse_motion_pose,
+            )
             report["after_T_link7_in_base"] = after_T.tolist()
+            report["inactive_after_T_link7_in_base"] = inactive_after_T.tolist()
             report["tracking"] = evaluate_motion(before_T, target_T, after_T)
+            report["inactive_tracking"] = evaluate_motion(inactive_before_T, inactive_before_T, inactive_after_T)
             tracking = report["tracking"]["translation_tracking"]
+            inactive_tracking = report["inactive_tracking"]
             print(
                 "RESULT "
                 f"target_trans={report['tracking']['commanded_delta_norm_m']:.4f}m "
@@ -276,7 +355,9 @@ def main() -> int:
                 f"target_rot={report['tracking']['target_rotation_delta_deg']:.2f}deg "
                 f"actual_rot={report['tracking']['observed_rotation_delta_deg']:.2f}deg "
                 f"final_pos_err={report['tracking']['final_pose_position_error_m']:.4f}m "
-                f"final_rot_err={report['tracking']['final_pose_rotation_error_deg']:.2f}deg"
+                f"final_rot_err={report['tracking']['final_pose_rotation_error_deg']:.2f}deg "
+                f"inactive_{inactive_side}_drift={inactive_tracking['observed_delta_norm_m']:.4f}m "
+                f"inactive_{inactive_side}_rot={inactive_tracking['observed_rotation_delta_deg']:.2f}deg"
             )
             report["ok"] = bool(control.get("ok"))
     except SystemExit:
