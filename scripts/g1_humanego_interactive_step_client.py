@@ -263,6 +263,7 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
         "ik_abs_joint_blocked_reason": control_result.get("blocked_reason"),
         "ik_abs_joint_selected_candidate": control_result.get("ik_selected_candidate"),
         "ik_abs_joint_selected_reason": control_result.get("ik_selected_reason"),
+        "ik_abs_joint_selection_mode": control_result.get("ik_selection_mode"),
         "ik_abs_joint_pose_acceptance": control_result.get("ik_pose_acceptance"),
         "ik_abs_joint_candidate_count": control_result.get("ik_candidate_count"),
         "ik_abs_joint_safe_candidate_count": control_result.get("ik_safe_candidate_count"),
@@ -996,9 +997,10 @@ def select_ik_abs_joint_candidate(
         selected = min(
             strict_safe,
             key=lambda item: (
-                float(item["rotation_error_deg"]),
-                float(item["position_error_m"]),
                 float(item["q_delta_abs_max_rad"]),
+                float(item["q_delta_norm_rad"]),
+                float(item["position_error_m"]),
+                float(item["rotation_error_deg"]),
                 float(item["cost"]),
             ),
         )
@@ -1070,6 +1072,116 @@ def select_ik_abs_joint_candidate(
     }
 
 
+def select_fast_ik_abs_joint_candidate(
+    kin: G1UrdfKinematics,
+    side: str,
+    target_T: np.ndarray,
+    q_before: np.ndarray,
+    waist_for_urdf: list[float],
+    max_nfev: int,
+    max_joint_delta_rad: float,
+) -> dict[str, Any]:
+    ik = kin.solve_link7_ik(
+        side,
+        target_T,
+        q_before,
+        waist_states=waist_for_urdf,
+        max_nfev=max_nfev,
+    )
+    selected = candidate_summary_from_ik(
+        name="current/default",
+        seed_name="current",
+        weight_name="default",
+        ik=ik,
+        q_before=q_before,
+        max_joint_delta_rad=max_joint_delta_rad,
+    )
+    strict_safe = bool(selected["success"] and selected["safe_by_joint_delta"])
+    relaxed_safe = bool(selected["safe_by_joint_delta"] and selected["relaxed_pose_ok"])
+    if strict_safe:
+        selected_reason = "single_fast_strict"
+        pose_acceptance = "strict"
+    elif relaxed_safe:
+        selected_reason = "single_fast_relaxed"
+        pose_acceptance = "relaxed"
+    else:
+        selected_reason = "single_fast_failed"
+        pose_acceptance = "none"
+    return {
+        "selected": selected,
+        "selected_reason": selected_reason,
+        "pose_acceptance": pose_acceptance,
+        "ok": bool(strict_safe or relaxed_safe),
+        "candidate_count": 1,
+        "safe_candidate_count": 1 if selected["safe_by_joint_delta"] else 0,
+        "strict_safe_candidate_count": 1 if strict_safe else 0,
+        "relaxed_safe_candidate_count": 1 if relaxed_safe else 0,
+        "relaxed_position_tolerance_m": IK_RELAXED_POSITION_TOLERANCE_M,
+        "relaxed_rotation_tolerance_deg": IK_RELAXED_ROTATION_TOLERANCE_DEG,
+        "best_overall": selected,
+        "candidates": [selected],
+    }
+
+
+def select_ik_candidate_by_mode(
+    kin: G1UrdfKinematics,
+    side: str,
+    target_T: np.ndarray,
+    q_before: np.ndarray,
+    waist_for_urdf: list[float],
+    max_nfev: int,
+    max_joint_delta_rad: float,
+    selection_mode: str,
+) -> dict[str, Any]:
+    selection_mode = str(selection_mode or "fast").lower()
+    if selection_mode == "fast":
+        selection = select_fast_ik_abs_joint_candidate(
+            kin,
+            side,
+            target_T,
+            q_before,
+            waist_for_urdf,
+            max_nfev,
+            max_joint_delta_rad,
+        )
+    elif selection_mode == "multi":
+        selection = select_ik_abs_joint_candidate(
+            kin,
+            side,
+            target_T,
+            q_before,
+            waist_for_urdf,
+            max_nfev,
+            max_joint_delta_rad,
+        )
+    elif selection_mode == "fallback":
+        selection = select_fast_ik_abs_joint_candidate(
+            kin,
+            side,
+            target_T,
+            q_before,
+            waist_for_urdf,
+            max_nfev,
+            max_joint_delta_rad,
+        )
+        if not selection["ok"]:
+            fallback = select_ik_abs_joint_candidate(
+                kin,
+                side,
+                target_T,
+                q_before,
+                waist_for_urdf,
+                max_nfev,
+                max_joint_delta_rad,
+            )
+            fallback["fast_attempt"] = selection
+            selection = fallback
+    else:
+        raise ValueError(f"unknown IK ABS_JOINT selection mode {selection_mode!r}; expected fast/fallback/multi")
+    selection["selection_mode"] = selection_mode
+    return selection
+
+
 def call_ee_ik_abs_joint_trajectory_once(
     controller: Any,
     robot: Any,
@@ -1082,6 +1194,7 @@ def call_ee_ik_abs_joint_trajectory_once(
     max_nfev: int,
     max_joint_delta_rad: float,
     urdf_zip: str,
+    selection_mode: str = "fast",
     execute_control: bool = True,
 ) -> dict[str, Any]:
     started = time.time()
@@ -1091,7 +1204,7 @@ def call_ee_ik_abs_joint_trajectory_once(
     q_before, arm_indices = side_q_from_arm_state(joint_states["arm"], side, arm_state_mapping)
     kin = G1UrdfKinematics(urdf_zip)
     before_fk_T = kin.link7_fk(side, q_before, waist_states=waist_for_urdf)
-    ik_selection = select_ik_abs_joint_candidate(
+    ik_selection = select_ik_candidate_by_mode(
         kin,
         side,
         target_T,
@@ -1099,6 +1212,7 @@ def call_ee_ik_abs_joint_trajectory_once(
         waist_for_urdf,
         max_nfev,
         max_joint_delta_rad,
+        selection_mode,
     )
     selected_ik = ik_selection["selected"]
     q_target = np.asarray(selected_ik["q_solution"], dtype=np.float64).reshape(7)
@@ -1123,6 +1237,7 @@ def call_ee_ik_abs_joint_trajectory_once(
     ik_candidate_fields = {
         "ik_selected_candidate": ik_selected_brief,
         "ik_selected_reason": ik_selection["selected_reason"],
+        "ik_selection_mode": ik_selection["selection_mode"],
         "ik_pose_acceptance": ik_selection["pose_acceptance"],
         "ik_candidate_count": ik_selection["candidate_count"],
         "ik_safe_candidate_count": ik_selection["safe_candidate_count"],
@@ -1326,6 +1441,7 @@ def call_ee_control_mode(
     ik_abs_joint_max_nfev: int = 300,
     ik_abs_joint_max_delta_rad: float = 0.35,
     ik_abs_joint_urdf_zip: str = str(DEFAULT_G1_ZIP),
+    ik_abs_joint_selection_mode: str = "fast",
 ) -> dict[str, Any]:
     if mode == "absolute_pose":
         result = call_ee_control(controller, pose, side, lifetime, send_hz, execute_s)
@@ -1377,16 +1493,18 @@ def call_ee_control_mode(
             ik_abs_joint_max_nfev,
             ik_abs_joint_max_delta_rad,
             ik_abs_joint_urdf_zip,
+            ik_abs_joint_selection_mode,
         )
         command_duration_s = float(result.get("duration_s", 0.0))
         if result.get("ok"):
-            wait_s = max(0.0, float(execute_s) - (time.time() - started))
+            wait_s = max(0.0, float(execute_s))
             if wait_s > 0.0:
                 time.sleep(wait_s)
         result["ee_control_mode"] = mode
         result["send_mode"] = "single_ik_abs_joint_trajectory"
         result["num_sends"] = 1
         result["command_duration_s"] = command_duration_s
+        result["post_command_wait_s"] = wait_s if result.get("ok") else 0.0
         result["duration_s"] = time.time() - started
         result["execute_s"] = float(execute_s)
         result["trajectory_reference_time"] = reference_time
@@ -1439,6 +1557,7 @@ def call_ee_closed_loop_control(
     ik_abs_joint_max_nfev: int,
     ik_abs_joint_max_delta_rad: float,
     ik_abs_joint_urdf_zip: str,
+    ik_abs_joint_selection_mode: str,
     max_attempts: int,
     position_tolerance_m: float,
     rotation_tolerance_deg: float,
@@ -1510,6 +1629,7 @@ def call_ee_closed_loop_control(
             ik_abs_joint_max_nfev,
             ik_abs_joint_max_delta_rad,
             ik_abs_joint_urdf_zip,
+            ik_abs_joint_selection_mode,
         )
         if settle_s > 0.0:
             time.sleep(float(settle_s))
@@ -1783,6 +1903,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ik-abs-joint-max-nfev", type=int, default=300)
     parser.add_argument("--ik-abs-joint-max-delta-rad", type=float, default=0.35)
     parser.add_argument("--ik-abs-joint-urdf-zip", default=str(DEFAULT_G1_ZIP))
+    parser.add_argument("--ik-abs-joint-selection-mode", choices=["fast", "fallback", "multi"], default="fast")
     parser.add_argument("--closed-loop-ee", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--closed-loop-max-attempts", type=int, default=5)
     parser.add_argument("--closed-loop-position-tolerance-m", type=float, default=0.01)
@@ -1990,12 +2111,14 @@ def main() -> int:
                     args.ik_abs_joint_max_nfev,
                     args.ik_abs_joint_max_delta_rad,
                     args.ik_abs_joint_urdf_zip,
+                    args.ik_abs_joint_selection_mode,
                     execute_control=False,
                 )
                 print(
                     "ik_abs_joint preview: "
                     f"ok={ik_preview.get('ok')} "
                     f"blocked={ik_preview.get('blocked_reason')} "
+                    f"mode={ik_preview.get('ik_selection_mode')} "
                     f"selected={((ik_preview.get('ik_selected_candidate') or {}).get('name'))} "
                     f"reason={ik_preview.get('ik_selected_reason')} "
                     f"acceptance={ik_preview.get('ik_pose_acceptance')} "
@@ -2164,6 +2287,7 @@ def main() -> int:
                     args.ik_abs_joint_max_nfev,
                     args.ik_abs_joint_max_delta_rad,
                     args.ik_abs_joint_urdf_zip,
+                    args.ik_abs_joint_selection_mode,
                     args.closed_loop_max_attempts,
                     args.closed_loop_position_tolerance_m,
                     args.closed_loop_rotation_tolerance_deg,
@@ -2221,6 +2345,7 @@ def main() -> int:
                     args.ik_abs_joint_max_nfev,
                     args.ik_abs_joint_max_delta_rad,
                     args.ik_abs_joint_urdf_zip,
+                    args.ik_abs_joint_selection_mode,
                 )
             report["control_sent"] = bool(report.get("control_sent")) or bool(control_result.get("ok"))
             step_record["executed"] = bool(control_result.get("ok"))
