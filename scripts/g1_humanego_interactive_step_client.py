@@ -56,6 +56,8 @@ from g1_urdf_ik import DEFAULT_G1_ZIP, G1UrdfKinematics, pose_error  # noqa: E40
 
 
 EPS = 1e-12
+IK_RELAXED_POSITION_TOLERANCE_M = 0.010
+IK_RELAXED_ROTATION_TOLERANCE_DEG = 5.0
 
 
 def utc_stamp() -> str:
@@ -259,6 +261,13 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
         "ik_abs_joint_position_error_m": control_ik_error.get("position_error_m"),
         "ik_abs_joint_rotation_error_deg": control_ik_error.get("rotation_error_deg"),
         "ik_abs_joint_blocked_reason": control_result.get("blocked_reason"),
+        "ik_abs_joint_selected_candidate": control_result.get("ik_selected_candidate"),
+        "ik_abs_joint_selected_reason": control_result.get("ik_selected_reason"),
+        "ik_abs_joint_pose_acceptance": control_result.get("ik_pose_acceptance"),
+        "ik_abs_joint_candidate_count": control_result.get("ik_candidate_count"),
+        "ik_abs_joint_safe_candidate_count": control_result.get("ik_safe_candidate_count"),
+        "ik_abs_joint_strict_safe_candidate_count": control_result.get("ik_strict_safe_candidate_count"),
+        "ik_abs_joint_relaxed_safe_candidate_count": control_result.get("ik_relaxed_safe_candidate_count"),
         "closed_loop_enabled": closed_loop.get("enabled"),
         "closed_loop_reached": closed_loop.get("reached"),
         "closed_loop_attempts": closed_loop.get("num_attempts"),
@@ -864,6 +873,203 @@ def interpolate_q(q_start: np.ndarray, q_target: np.ndarray, num_points: int) ->
     return [q_start + (q_target - q_start) * (idx / count) for idx in range(1, count + 1)]
 
 
+def ik_seed_offsets() -> list[tuple[str, np.ndarray]]:
+    zeros = np.zeros(7, dtype=np.float64)
+    specs: list[tuple[str, np.ndarray]] = [("current", zeros)]
+    for joint_idx, magnitude in [(3, 0.10), (3, 0.20), (5, 0.12), (6, 0.12), (1, 0.08)]:
+        for sign in (-1.0, 1.0):
+            offset = zeros.copy()
+            offset[joint_idx] = sign * magnitude
+            specs.append((f"j{joint_idx + 1}_{sign * magnitude:+.2f}", offset))
+    for name, pairs in [
+        ("elbow_wrist_a", [(3, -0.16), (5, -0.10), (6, -0.08)]),
+        ("elbow_wrist_b", [(3, 0.16), (5, 0.10), (6, 0.08)]),
+        ("elbow_wrist_c", [(3, -0.16), (5, 0.10), (6, -0.08)]),
+        ("elbow_wrist_d", [(3, 0.16), (5, -0.10), (6, 0.08)]),
+    ]:
+        offset = zeros.copy()
+        for joint_idx, value in pairs:
+            offset[joint_idx] = value
+        specs.append((name, offset))
+    return specs
+
+
+def ik_weight_profiles() -> list[dict[str, float | str]]:
+    return [
+        {"name": "default", "position_weight": 20.0, "rotation_weight": 1.0, "smooth_weight": 0.035, "home_weight": 0.005},
+        {"name": "rot2_low_smooth", "position_weight": 20.0, "rotation_weight": 2.5, "smooth_weight": 0.010, "home_weight": 0.002},
+        {"name": "rot5_low_smooth", "position_weight": 24.0, "rotation_weight": 5.0, "smooth_weight": 0.003, "home_weight": 0.000},
+        {"name": "rot8_no_home", "position_weight": 30.0, "rotation_weight": 8.0, "smooth_weight": 0.001, "home_weight": 0.000},
+        {"name": "balanced_pose", "position_weight": 80.0, "rotation_weight": 12.0, "smooth_weight": 0.0005, "home_weight": 0.000},
+        {"name": "position_first", "position_weight": 200.0, "rotation_weight": 1.0, "smooth_weight": 0.010, "home_weight": 0.000},
+        {"name": "rotation_first", "position_weight": 20.0, "rotation_weight": 50.0, "smooth_weight": 0.003, "home_weight": 0.000},
+        {"name": "pose_no_smooth", "position_weight": 35.0, "rotation_weight": 10.0, "smooth_weight": 0.000, "home_weight": 0.000},
+    ]
+
+
+def candidate_summary_from_ik(
+    *,
+    name: str,
+    seed_name: str,
+    weight_name: str,
+    ik: Any,
+    q_before: np.ndarray,
+    max_joint_delta_rad: float,
+) -> dict[str, Any]:
+    q_delta = np.asarray(ik.q_solution, dtype=np.float64).reshape(7) - np.asarray(q_before, dtype=np.float64).reshape(7)
+    q_delta_abs_max = float(np.max(np.abs(q_delta)))
+    safe_by_delta = bool(q_delta_abs_max <= float(max_joint_delta_rad))
+    relaxed_pose_ok = bool(
+        float(ik.position_error_m) <= IK_RELAXED_POSITION_TOLERANCE_M
+        and float(ik.rotation_error_deg) <= IK_RELAXED_ROTATION_TOLERANCE_DEG
+    )
+    return {
+        "name": name,
+        "seed_name": seed_name,
+        "weight_name": weight_name,
+        "success": bool(ik.success),
+        "relaxed_pose_ok": relaxed_pose_ok,
+        "relaxed_position_tolerance_m": IK_RELAXED_POSITION_TOLERANCE_M,
+        "relaxed_rotation_tolerance_deg": IK_RELAXED_ROTATION_TOLERANCE_DEG,
+        "safe_by_joint_delta": safe_by_delta,
+        "position_error_m": float(ik.position_error_m),
+        "rotation_error_deg": float(ik.rotation_error_deg),
+        "q_delta_abs_max_rad": q_delta_abs_max,
+        "q_delta_norm_rad": float(np.linalg.norm(q_delta)),
+        "min_limit_margin_rad": ik.min_limit_margin_rad,
+        "num_function_evals": int(ik.num_function_evals),
+        "cost": float(ik.cost),
+        "q_solution": np.asarray(ik.q_solution, dtype=np.float64).tolist(),
+        "q_delta_from_current": q_delta.tolist(),
+        "ik": ik.to_json(),
+    }
+
+
+def select_ik_abs_joint_candidate(
+    kin: G1UrdfKinematics,
+    side: str,
+    target_T: np.ndarray,
+    q_before: np.ndarray,
+    waist_for_urdf: list[float],
+    max_nfev: int,
+    max_joint_delta_rad: float,
+) -> dict[str, Any]:
+    side = kin.side_from_name(side)
+    target_T = np.asarray(target_T, dtype=np.float64).reshape(4, 4)
+    q_before = np.asarray(q_before, dtype=np.float64).reshape(7)
+    lows, highs = kin.joint_limits(side)
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for seed_name, offset in ik_seed_offsets():
+        q_seed = np.clip(q_before + offset, lows, highs)
+        for weights in ik_weight_profiles():
+            weight_name = str(weights["name"])
+            if (seed_name, weight_name) in seen:
+                continue
+            seen.add((seed_name, weight_name))
+            ik = kin.solve_link7_ik(
+                side,
+                target_T,
+                q_seed,
+                waist_states=waist_for_urdf,
+                max_nfev=max_nfev,
+                position_weight=float(weights["position_weight"]),
+                rotation_weight=float(weights["rotation_weight"]),
+                smooth_weight=float(weights["smooth_weight"]),
+                home_weight=float(weights["home_weight"]),
+            )
+            candidates.append(
+                candidate_summary_from_ik(
+                    name=f"{seed_name}/{weight_name}",
+                    seed_name=seed_name,
+                    weight_name=weight_name,
+                    ik=ik,
+                    q_before=q_before,
+                    max_joint_delta_rad=max_joint_delta_rad,
+                )
+            )
+
+    safe_candidates = [item for item in candidates if item["safe_by_joint_delta"]]
+    strict_safe = [item for item in safe_candidates if item["success"]]
+    relaxed_safe = [item for item in safe_candidates if item["relaxed_pose_ok"]]
+    if strict_safe:
+        selected = min(
+            strict_safe,
+            key=lambda item: (
+                float(item["rotation_error_deg"]),
+                float(item["position_error_m"]),
+                float(item["q_delta_abs_max_rad"]),
+                float(item["cost"]),
+            ),
+        )
+        reason = "strict_success_safe"
+        pose_acceptance = "strict"
+    elif relaxed_safe:
+        selected = min(
+            relaxed_safe,
+            key=lambda item: (
+                max(
+                    float(item["position_error_m"]) / IK_RELAXED_POSITION_TOLERANCE_M,
+                    float(item["rotation_error_deg"]) / IK_RELAXED_ROTATION_TOLERANCE_DEG,
+                ),
+                float(item["position_error_m"]) / IK_RELAXED_POSITION_TOLERANCE_M
+                + float(item["rotation_error_deg"]) / IK_RELAXED_ROTATION_TOLERANCE_DEG,
+                float(item["q_delta_abs_max_rad"]),
+                float(item["cost"]),
+            ),
+        )
+        reason = "relaxed_pose_safe"
+        pose_acceptance = "relaxed"
+    elif safe_candidates:
+        selected = min(
+            safe_candidates,
+            key=lambda item: (
+                float(item["rotation_error_deg"]),
+                float(item["position_error_m"]),
+                float(item["q_delta_abs_max_rad"]),
+                float(item["cost"]),
+            ),
+        )
+        reason = "best_safe_but_not_strict_success"
+        pose_acceptance = "none"
+    else:
+        selected = min(
+            candidates,
+            key=lambda item: (
+                float(item["q_delta_abs_max_rad"]),
+                float(item["rotation_error_deg"]),
+                float(item["position_error_m"]),
+                float(item["cost"]),
+            ),
+        )
+        reason = "no_safe_candidate"
+        pose_acceptance = "none"
+
+    best_overall = min(
+        candidates,
+        key=lambda item: (
+            float(item["rotation_error_deg"]),
+            float(item["position_error_m"]),
+            float(item["q_delta_abs_max_rad"]),
+            float(item["cost"]),
+        ),
+    )
+    return {
+        "selected": selected,
+        "selected_reason": reason,
+        "pose_acceptance": pose_acceptance,
+        "ok": bool(selected["safe_by_joint_delta"] and (selected["success"] or selected["relaxed_pose_ok"])),
+        "candidate_count": len(candidates),
+        "safe_candidate_count": len(safe_candidates),
+        "strict_safe_candidate_count": len(strict_safe),
+        "relaxed_safe_candidate_count": len(relaxed_safe),
+        "relaxed_position_tolerance_m": IK_RELAXED_POSITION_TOLERANCE_M,
+        "relaxed_rotation_tolerance_deg": IK_RELAXED_ROTATION_TOLERANCE_DEG,
+        "best_overall": best_overall,
+        "candidates": candidates,
+    }
+
+
 def call_ee_ik_abs_joint_trajectory_once(
     controller: Any,
     robot: Any,
@@ -885,15 +1091,51 @@ def call_ee_ik_abs_joint_trajectory_once(
     q_before, arm_indices = side_q_from_arm_state(joint_states["arm"], side, arm_state_mapping)
     kin = G1UrdfKinematics(urdf_zip)
     before_fk_T = kin.link7_fk(side, q_before, waist_states=waist_for_urdf)
-    ik = kin.solve_link7_ik(side, target_T, q_before, waist_states=waist_for_urdf, max_nfev=max_nfev)
-    q_target = ik.q_solution
+    ik_selection = select_ik_abs_joint_candidate(
+        kin,
+        side,
+        target_T,
+        q_before,
+        waist_for_urdf,
+        max_nfev,
+        max_joint_delta_rad,
+    )
+    selected_ik = ik_selection["selected"]
+    q_target = np.asarray(selected_ik["q_solution"], dtype=np.float64).reshape(7)
     q_delta = q_target - q_before
+    q_delta_norm = float(np.linalg.norm(q_delta))
     q_delta_abs_max = float(np.max(np.abs(q_delta)))
     target_fk_T = kin.link7_fk(side, q_target, waist_states=waist_for_urdf)
     ik_fk_error = pose_error(target_fk_T, target_T)
-    if not ik.success:
+    ik_selected_brief = {
+        "name": selected_ik.get("name"),
+        "seed_name": selected_ik.get("seed_name"),
+        "weight_name": selected_ik.get("weight_name"),
+        "success": selected_ik.get("success"),
+        "relaxed_pose_ok": selected_ik.get("relaxed_pose_ok"),
+        "safe_by_joint_delta": selected_ik.get("safe_by_joint_delta"),
+        "position_error_m": selected_ik.get("position_error_m"),
+        "rotation_error_deg": selected_ik.get("rotation_error_deg"),
+        "q_delta_abs_max_rad": selected_ik.get("q_delta_abs_max_rad"),
+        "q_delta_norm_rad": selected_ik.get("q_delta_norm_rad"),
+        "cost": selected_ik.get("cost"),
+    }
+    ik_candidate_fields = {
+        "ik_selected_candidate": ik_selected_brief,
+        "ik_selected_reason": ik_selection["selected_reason"],
+        "ik_pose_acceptance": ik_selection["pose_acceptance"],
+        "ik_candidate_count": ik_selection["candidate_count"],
+        "ik_safe_candidate_count": ik_selection["safe_candidate_count"],
+        "ik_strict_safe_candidate_count": ik_selection["strict_safe_candidate_count"],
+        "ik_relaxed_safe_candidate_count": ik_selection["relaxed_safe_candidate_count"],
+        "ik_relaxed_position_tolerance_m": ik_selection["relaxed_position_tolerance_m"],
+        "ik_relaxed_rotation_tolerance_deg": ik_selection["relaxed_rotation_tolerance_deg"],
+        "ik_best_overall_candidate": ik_selection["best_overall"],
+        "ik_candidates": ik_selection["candidates"],
+    }
+
+    def base_result() -> dict[str, Any]:
         return {
-            "ok": False,
             "duration_s": time.time() - started,
             "mode": "ik_abs_joint",
             "side": side,
@@ -904,35 +1146,32 @@ def call_ee_ik_abs_joint_trajectory_once(
             "q_before": q_before.tolist(),
             "q_target": q_target.tolist(),
             "q_delta": q_delta.tolist(),
+            "q_delta_norm_rad": q_delta_norm,
             "q_delta_abs_max_rad": q_delta_abs_max,
             "before_fk_T_link7_in_base": before_fk_T.tolist(),
             "target_T_link7_in_base": target_T.tolist(),
             "target_fk_T_link7_in_base": target_fk_T.tolist(),
-            "ik": ik.to_json(),
+            "ik": selected_ik["ik"],
             "ik_fk_vs_target_error": ik_fk_error,
-            "blocked_reason": "ik_failed",
+            **ik_candidate_fields,
         }
-    if q_delta_abs_max > float(max_joint_delta_rad):
-        return {
+
+    if not ik_selection["ok"]:
+        if not selected_ik.get("safe_by_joint_delta"):
+            blocked_reason = "joint_delta_too_large"
+        elif not selected_ik.get("success") and not selected_ik.get("relaxed_pose_ok"):
+            blocked_reason = "ik_failed_all_candidates"
+        else:
+            blocked_reason = "ik_selection_failed"
+        result = {
+            **base_result(),
             "ok": False,
-            "duration_s": time.time() - started,
-            "mode": "ik_abs_joint",
-            "side": side,
-            "joint_states": joint_states,
-            "waist_values_for_urdf": waist_for_urdf,
-            "arm_state_mapping": arm_state_mapping,
-            "arm_state_indices": arm_indices,
-            "q_before": q_before.tolist(),
-            "q_target": q_target.tolist(),
-            "q_delta": q_delta.tolist(),
-            "q_delta_abs_max_rad": q_delta_abs_max,
-            "before_fk_T_link7_in_base": before_fk_T.tolist(),
-            "target_T_link7_in_base": target_T.tolist(),
-            "target_fk_T_link7_in_base": target_fk_T.tolist(),
-            "ik": ik.to_json(),
-            "ik_fk_vs_target_error": ik_fk_error,
-            "blocked_reason": "joint_delta_too_large",
+            "blocked_reason": blocked_reason,
             "max_joint_delta_rad": float(max_joint_delta_rad),
+        }
+        return {
+            key: json_safe(value)
+            for key, value in result.items()
         }
 
     q_rows = interpolate_q(q_before, q_target, num_points)
@@ -958,84 +1197,48 @@ def call_ee_ik_abs_joint_trajectory_once(
         "trajectory_reference_time": float(trajectory_reference_time),
     }
     if not execute_control:
-        return {
+        result = {
+            **base_result(),
             "ok": True,
-            "duration_s": time.time() - started,
-            "mode": "ik_abs_joint",
-            "side": side,
             "preview_only": True,
-            "joint_states": joint_states,
-            "waist_values_for_urdf": waist_for_urdf,
-            "arm_state_mapping": arm_state_mapping,
-            "arm_state_indices": arm_indices,
             "num_points": int(num_points),
             "trajectory_reference_time": float(trajectory_reference_time),
-            "q_before": q_before.tolist(),
-            "q_target": q_target.tolist(),
-            "q_delta": q_delta.tolist(),
-            "q_delta_norm_rad": float(np.linalg.norm(q_delta)),
-            "q_delta_abs_max_rad": q_delta_abs_max,
             "full_arm_target_rows": full_arm_rows,
-            "before_fk_T_link7_in_base": before_fk_T.tolist(),
-            "target_T_link7_in_base": target_T.tolist(),
-            "target_fk_T_link7_in_base": target_fk_T.tolist(),
-            "ik": ik.to_json(),
-            "ik_fk_vs_target_error": ik_fk_error,
             "kwargs": json_safe(kwargs),
+        }
+        return {
+            key: json_safe(value)
+            for key, value in result.items()
         }
     try:
         result = controller.trajectory_tracking_control(**kwargs)
-        return {
+        output = {
+            **base_result(),
             "ok": True,
-            "duration_s": time.time() - started,
-            "mode": "ik_abs_joint",
-            "side": side,
-            "joint_states": joint_states,
-            "waist_values_for_urdf": waist_for_urdf,
-            "arm_state_mapping": arm_state_mapping,
-            "arm_state_indices": arm_indices,
             "num_points": int(num_points),
             "trajectory_reference_time": float(trajectory_reference_time),
-            "q_before": q_before.tolist(),
-            "q_target": q_target.tolist(),
-            "q_delta": q_delta.tolist(),
-            "q_delta_norm_rad": float(np.linalg.norm(q_delta)),
-            "q_delta_abs_max_rad": q_delta_abs_max,
             "full_arm_target_rows": full_arm_rows,
-            "before_fk_T_link7_in_base": before_fk_T.tolist(),
-            "target_T_link7_in_base": target_T.tolist(),
-            "target_fk_T_link7_in_base": target_fk_T.tolist(),
-            "ik": ik.to_json(),
-            "ik_fk_vs_target_error": ik_fk_error,
             "kwargs": json_safe(kwargs),
             "result": json_safe(result),
         }
-    except Exception as exc:
         return {
+            key: json_safe(value)
+            for key, value in output.items()
+        }
+    except Exception as exc:
+        output = {
+            **base_result(),
             "ok": False,
-            "duration_s": time.time() - started,
-            "mode": "ik_abs_joint",
-            "side": side,
-            "joint_states": joint_states,
-            "waist_values_for_urdf": waist_for_urdf,
-            "arm_state_mapping": arm_state_mapping,
-            "arm_state_indices": arm_indices,
             "num_points": int(num_points),
             "trajectory_reference_time": float(trajectory_reference_time),
-            "q_before": q_before.tolist(),
-            "q_target": q_target.tolist(),
-            "q_delta": q_delta.tolist(),
-            "q_delta_norm_rad": float(np.linalg.norm(q_delta)),
-            "q_delta_abs_max_rad": q_delta_abs_max,
-            "before_fk_T_link7_in_base": before_fk_T.tolist(),
-            "target_T_link7_in_base": target_T.tolist(),
-            "target_fk_T_link7_in_base": target_fk_T.tolist(),
-            "ik": ik.to_json(),
-            "ik_fk_vs_target_error": ik_fk_error,
             "kwargs": json_safe(kwargs),
             "error_type": type(exc).__name__,
             "error": str(exc),
             "traceback": traceback.format_exc(),
+        }
+        return {
+            key: json_safe(value)
+            for key, value in output.items()
         }
 
 
@@ -1793,6 +1996,13 @@ def main() -> int:
                     "ik_abs_joint preview: "
                     f"ok={ik_preview.get('ok')} "
                     f"blocked={ik_preview.get('blocked_reason')} "
+                    f"selected={((ik_preview.get('ik_selected_candidate') or {}).get('name'))} "
+                    f"reason={ik_preview.get('ik_selected_reason')} "
+                    f"acceptance={ik_preview.get('ik_pose_acceptance')} "
+                    f"candidates={ik_preview.get('ik_candidate_count')} "
+                    f"safe={ik_preview.get('ik_safe_candidate_count')} "
+                    f"strict_safe={ik_preview.get('ik_strict_safe_candidate_count')} "
+                    f"relaxed_safe={ik_preview.get('ik_relaxed_safe_candidate_count')} "
                     f"q_delta_abs_max_rad={ik_preview.get('q_delta_abs_max_rad')} "
                     f"q_delta_norm_rad={ik_preview.get('q_delta_norm_rad')} "
                     f"ik_pos_err={((ik_preview.get('ik_fk_vs_target_error') or {}).get('position_error_m'))} "
