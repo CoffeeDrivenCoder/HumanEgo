@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +94,98 @@ def threshold_pass(error: dict[str, Any], pos_tol_m: float, rot_tol_deg: float) 
     )
 
 
+def make_base_translation_target(T: np.ndarray, name: str, delta: list[float]) -> dict[str, Any]:
+    target = np.asarray(T, dtype=np.float64).reshape(4, 4).copy()
+    delta_arr = np.asarray(delta, dtype=np.float64).reshape(3)
+    target[:3, 3] += delta_arr
+    return {
+        "name": name,
+        "type": "base_translation",
+        "delta_m": delta_arr.tolist(),
+        "delta_rotation_deg": 0.0,
+        "target_T_link7_in_base": target,
+    }
+
+
+def make_base_rotation_target(T: np.ndarray, name: str, axis: str, deg: float) -> dict[str, Any]:
+    target = np.asarray(T, dtype=np.float64).reshape(4, 4).copy()
+    rotvec = {"x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0]}[axis]
+    R_delta = Rotation.from_rotvec(np.asarray(rotvec, dtype=np.float64) * np.deg2rad(float(deg))).as_matrix()
+    target[:3, :3] = R_delta @ target[:3, :3]
+    return {
+        "name": name,
+        "type": "base_rotation",
+        "delta_m": [0.0, 0.0, 0.0],
+        "axis": axis,
+        "delta_rotation_deg": float(deg),
+        "target_T_link7_in_base": target,
+    }
+
+
+def make_ik_probe_targets(T: np.ndarray, translation_m: float, rotation_deg: float) -> list[dict[str, Any]]:
+    step = float(translation_m)
+    deg = float(rotation_deg)
+    targets: list[dict[str, Any]] = []
+    for axis_name, delta in [
+        ("x_pos", [step, 0.0, 0.0]),
+        ("x_neg", [-step, 0.0, 0.0]),
+        ("y_pos", [0.0, step, 0.0]),
+        ("y_neg", [0.0, -step, 0.0]),
+        ("z_pos", [0.0, 0.0, step]),
+        ("z_neg", [0.0, 0.0, -step]),
+    ]:
+        targets.append(make_base_translation_target(T, f"translate_{axis_name}", delta))
+    for axis in ["x", "y", "z"]:
+        targets.append(make_base_rotation_target(T, f"rotate_{axis}_pos", axis, deg))
+        targets.append(make_base_rotation_target(T, f"rotate_{axis}_neg", axis, -deg))
+    return targets
+
+
+def run_ik_case(
+    kin: G1UrdfKinematics,
+    *,
+    side: str,
+    target_T: np.ndarray,
+    q_seed: np.ndarray,
+    q_reference: np.ndarray,
+    waist_for_urdf: list[float],
+    label: str,
+    seed_label: str,
+    max_nfev: int,
+    pos_tol_m: float,
+    rot_tol_deg: float,
+    q_abs_tol_rad: float | None = None,
+) -> dict[str, Any]:
+    started = time.time()
+    ik = kin.solve_link7_ik(side, target_T, q_seed, waist_states=waist_for_urdf, max_nfev=max_nfev)
+    duration_s = time.time() - started
+    fk_T = kin.link7_fk(side, ik.q_solution, waist_states=waist_for_urdf)
+    fk_error = pose_error(fk_T, target_T)
+    q_delta_seed = ik.q_solution - q_seed
+    q_delta_reference = ik.q_solution - q_reference
+    q_delta_reference_abs_max = max_abs(q_delta_reference)
+    return {
+        "label": label,
+        "seed_label": seed_label,
+        "duration_s": duration_s,
+        "ik": ik.to_json(),
+        "ik_fk_T_link7_in_base": fk_T.tolist(),
+        "ik_fk_vs_target_error": fk_error,
+        "q_solution": ik.q_solution.tolist(),
+        "q_delta_from_seed": q_delta_seed.tolist(),
+        "q_delta_from_seed_norm_rad": float(np.linalg.norm(q_delta_seed)),
+        "q_delta_from_seed_abs_max_rad": max_abs(q_delta_seed),
+        "q_delta_from_reference": q_delta_reference.tolist(),
+        "q_delta_from_reference_norm_rad": float(np.linalg.norm(q_delta_reference)),
+        "q_delta_from_reference_abs_max_rad": q_delta_reference_abs_max,
+        "checks": {
+            "ik_success": bool(ik.success),
+            "pose_within_tolerance": threshold_pass(fk_error, pos_tol_m, rot_tol_deg),
+            "q_close_to_reference": None if q_abs_tol_rad is None else q_delta_reference_abs_max <= float(q_abs_tol_rad),
+        },
+    }
+
+
 def validate_side_sample(
     kin: G1UrdfKinematics,
     *,
@@ -107,6 +200,10 @@ def validate_side_sample(
     ik_pos_tol_m: float,
     ik_rot_tol_deg: float,
     q_abs_tol_rad: float,
+    probe_targets: bool,
+    probe_translation_m: float,
+    probe_rotation_deg: float,
+    probe_max_joint_delta_rad: float,
 ) -> dict[str, Any]:
     q_real, indices = side_q_from_arm_state(joint_states["arm"], side, mapping)
     waist_for_urdf = waist_values_with_height_offset(joint_states["waist"], waist_height_offset_m)
@@ -121,6 +218,63 @@ def validate_side_sample(
     ik_fk_error = pose_error(ik_fk_T, sdk_T)
     q_delta = ik.q_solution - q_real
     q_delta_abs_max = max_abs(q_delta)
+    actual_pose_cases = {
+        "real_seed": run_ik_case(
+            kin,
+            side=side,
+            target_T=sdk_T,
+            q_seed=q_real,
+            q_reference=q_real,
+            waist_for_urdf=waist_for_urdf,
+            label="actual_pose",
+            seed_label="real_seed",
+            max_nfev=max_nfev,
+            pos_tol_m=ik_pos_tol_m,
+            rot_tol_deg=ik_rot_tol_deg,
+            q_abs_tol_rad=q_abs_tol_rad,
+        ),
+        "home_seed": run_ik_case(
+            kin,
+            side=side,
+            target_T=sdk_T,
+            q_seed=kin.home_q(side),
+            q_reference=q_real,
+            waist_for_urdf=waist_for_urdf,
+            label="actual_pose",
+            seed_label="home_seed",
+            max_nfev=max_nfev,
+            pos_tol_m=ik_pos_tol_m,
+            rot_tol_deg=ik_rot_tol_deg,
+            q_abs_tol_rad=None,
+        ),
+    }
+
+    probe_reports = []
+    if probe_targets:
+        for target in make_ik_probe_targets(sdk_T, probe_translation_m, probe_rotation_deg):
+            case = run_ik_case(
+                kin,
+                side=side,
+                target_T=target["target_T_link7_in_base"],
+                q_seed=q_real,
+                q_reference=q_real,
+                waist_for_urdf=waist_for_urdf,
+                label=target["name"],
+                seed_label="real_seed",
+                max_nfev=max_nfev,
+                pos_tol_m=ik_pos_tol_m,
+                rot_tol_deg=ik_rot_tol_deg,
+                q_abs_tol_rad=None,
+            )
+            case["target_spec"] = {
+                key: value
+                for key, value in target.items()
+                if key != "target_T_link7_in_base"
+            }
+            case["checks"]["joint_delta_within_probe_limit"] = (
+                float(case["q_delta_from_reference_abs_max_rad"]) <= float(probe_max_joint_delta_rad)
+            )
+            probe_reports.append(case)
 
     return {
         "side": side,
@@ -138,6 +292,14 @@ def validate_side_sample(
         "q_ik_minus_q_real": q_delta.tolist(),
         "q_delta_norm_rad": float(np.linalg.norm(q_delta)),
         "q_delta_abs_max_rad": q_delta_abs_max,
+        "ik_performance": {
+            "actual_pose_cases": actual_pose_cases,
+            "probe_targets_enabled": bool(probe_targets),
+            "probe_translation_m": float(probe_translation_m),
+            "probe_rotation_deg": float(probe_rotation_deg),
+            "probe_max_joint_delta_rad": float(probe_max_joint_delta_rad),
+            "probe_cases": probe_reports,
+        },
         "checks": {
             "fk_pose_ok": threshold_pass(fk_error, fk_pos_tol_m, fk_rot_tol_deg),
             "ik_success": bool(ik.success),
@@ -173,6 +335,10 @@ def sample_once(
             ik_pos_tol_m=args.ik_position_tolerance_m,
             ik_rot_tol_deg=args.ik_rotation_tolerance_deg,
             q_abs_tol_rad=args.ik_q_tolerance_rad,
+            probe_targets=args.ik_probe_targets,
+            probe_translation_m=args.ik_probe_translation_m,
+            probe_rotation_deg=args.ik_probe_rotation_deg,
+            probe_max_joint_delta_rad=args.ik_probe_max_joint_delta_rad,
         )
         for side in sides
     }
@@ -199,6 +365,49 @@ def summarize_samples(samples: list[dict[str, Any]], sides: list[str]) -> dict[s
         ik_rot = [float((rep.get("ik_fk_vs_sdk_error") or {}).get("rotation_error_deg", float("nan"))) for rep in reps]
         q_abs = [float(rep.get("q_delta_abs_max_rad", float("nan"))) for rep in reps]
         checks = [rep.get("checks") or {} for rep in reps]
+        perf = [rep.get("ik_performance") or {} for rep in reps]
+        real_seed_cases = [
+            ((item.get("actual_pose_cases") or {}).get("real_seed") or {})
+            for item in perf
+        ]
+        home_seed_cases = [
+            ((item.get("actual_pose_cases") or {}).get("home_seed") or {})
+            for item in perf
+        ]
+        probe_cases = [
+            case
+            for item in perf
+            for case in (item.get("probe_cases") or [])
+            if isinstance(case, dict)
+        ]
+
+        def case_values(cases: list[dict[str, Any]], path: tuple[str, ...]) -> list[float]:
+            values = []
+            for case in cases:
+                cur: Any = case
+                for key in path:
+                    cur = (cur or {}).get(key)
+                if cur is not None:
+                    values.append(float(cur))
+            return values
+
+        def case_bool_rate(cases: list[dict[str, Any]], path: tuple[str, ...]) -> float | None:
+            if not cases:
+                return None
+            passed = 0
+            for case in cases:
+                cur: Any = case
+                for key in path:
+                    cur = (cur or {}).get(key)
+                passed += 1 if bool(cur) else 0
+            return float(passed / len(cases))
+
+        real_seed_durations = case_values(real_seed_cases, ("duration_s",))
+        home_seed_durations = case_values(home_seed_cases, ("duration_s",))
+        probe_durations = case_values(probe_cases, ("duration_s",))
+        probe_pos = case_values(probe_cases, ("ik_fk_vs_target_error", "position_error_m"))
+        probe_rot = case_values(probe_cases, ("ik_fk_vs_target_error", "rotation_error_deg"))
+        probe_q_abs = case_values(probe_cases, ("q_delta_from_reference_abs_max_rad",))
         summary["sides"][side] = {
             "samples": len(reps),
             "fk_position_error_m_max": float(np.nanmax(fk_pos)) if fk_pos else None,
@@ -213,6 +422,45 @@ def summarize_samples(samples: list[dict[str, Any]], sides: list[str]) -> dict[s
             "all_ik_success": all(bool(c.get("ik_success")) for c in checks) if checks else False,
             "all_ik_fk_pose_ok": all(bool(c.get("ik_fk_pose_ok")) for c in checks) if checks else False,
             "all_ik_q_close_to_real": all(bool(c.get("ik_q_close_to_real")) for c in checks) if checks else False,
+            "ik_performance": {
+                "actual_pose_real_seed_success_rate": case_bool_rate(real_seed_cases, ("checks", "ik_success")),
+                "actual_pose_real_seed_pose_ok_rate": case_bool_rate(real_seed_cases, ("checks", "pose_within_tolerance")),
+                "actual_pose_real_seed_q_close_rate": case_bool_rate(real_seed_cases, ("checks", "q_close_to_reference")),
+                "actual_pose_real_seed_duration_s_mean": float(np.nanmean(real_seed_durations)) if real_seed_durations else None,
+                "actual_pose_real_seed_duration_s_max": float(np.nanmax(real_seed_durations)) if real_seed_durations else None,
+                "actual_pose_home_seed_success_rate": case_bool_rate(home_seed_cases, ("checks", "ik_success")),
+                "actual_pose_home_seed_pose_ok_rate": case_bool_rate(home_seed_cases, ("checks", "pose_within_tolerance")),
+                "actual_pose_home_seed_duration_s_mean": float(np.nanmean(home_seed_durations)) if home_seed_durations else None,
+                "actual_pose_home_seed_duration_s_max": float(np.nanmax(home_seed_durations)) if home_seed_durations else None,
+                "probe_case_count": len(probe_cases),
+                "probe_success_rate": case_bool_rate(probe_cases, ("checks", "ik_success")),
+                "probe_pose_ok_rate": case_bool_rate(probe_cases, ("checks", "pose_within_tolerance")),
+                "probe_joint_delta_ok_rate": case_bool_rate(probe_cases, ("checks", "joint_delta_within_probe_limit")),
+                "probe_position_error_m_max": float(np.nanmax(probe_pos)) if probe_pos else None,
+                "probe_rotation_error_deg_max": float(np.nanmax(probe_rot)) if probe_rot else None,
+                "probe_q_delta_abs_max_rad_max": float(np.nanmax(probe_q_abs)) if probe_q_abs else None,
+                "probe_duration_s_mean": float(np.nanmean(probe_durations)) if probe_durations else None,
+                "probe_duration_s_max": float(np.nanmax(probe_durations)) if probe_durations else None,
+                "probe_failures": [
+                    {
+                        "sample_idx": sample.get("sample_idx"),
+                        "label": case.get("label"),
+                        "position_error_m": (case.get("ik_fk_vs_target_error") or {}).get("position_error_m"),
+                        "rotation_error_deg": (case.get("ik_fk_vs_target_error") or {}).get("rotation_error_deg"),
+                        "q_delta_abs_max_rad": case.get("q_delta_from_reference_abs_max_rad"),
+                        "ik_success": (case.get("checks") or {}).get("ik_success"),
+                        "pose_within_tolerance": (case.get("checks") or {}).get("pose_within_tolerance"),
+                        "joint_delta_within_probe_limit": (case.get("checks") or {}).get("joint_delta_within_probe_limit"),
+                    }
+                    for sample in samples
+                    for case in ((((sample.get("sides") or {}).get(side) or {}).get("ik_performance") or {}).get("probe_cases") or [])
+                    if not (
+                        ((case.get("checks") or {}).get("ik_success"))
+                        and ((case.get("checks") or {}).get("pose_within_tolerance"))
+                        and ((case.get("checks") or {}).get("joint_delta_within_probe_limit"))
+                    )
+                ][:20],
+            },
         }
     summary["overall_ok"] = all(
         side_summary.get("all_fk_pose_ok")
@@ -231,10 +479,29 @@ def print_sample_summary(sample: dict[str, Any], sides: list[str]) -> None:
         fk = rep["urdf_fk_vs_sdk_error"]
         ik_fk = rep["ik_fk_vs_sdk_error"]
         ik = rep["ik_from_sdk_pose_seeded_by_real_q"]
+        perf = rep.get("ik_performance") or {}
+        probe_cases = perf.get("probe_cases") or []
+        probe_ok = [
+            bool((case.get("checks") or {}).get("ik_success"))
+            and bool((case.get("checks") or {}).get("pose_within_tolerance"))
+            and bool((case.get("checks") or {}).get("joint_delta_within_probe_limit"))
+            for case in probe_cases
+        ]
+        probe_part = "probe=off"
+        if probe_cases:
+            probe_pos_max = max(float((case.get("ik_fk_vs_target_error") or {}).get("position_error_m", 0.0)) for case in probe_cases)
+            probe_rot_max = max(float((case.get("ik_fk_vs_target_error") or {}).get("rotation_error_deg", 0.0)) for case in probe_cases)
+            probe_q_max = max(float(case.get("q_delta_from_reference_abs_max_rad", 0.0)) for case in probe_cases)
+            probe_part = (
+                f"probe_ok={sum(probe_ok)}/{len(probe_ok)} "
+                f"probe_max={probe_pos_max:.4f}m/{probe_rot_max:.2f}deg "
+                f"probe_qmax={probe_q_max:.3f}rad"
+            )
         parts.append(
             f"{side}: fk={fk['position_error_m']:.6f}m/{fk['rotation_error_deg']:.3f}deg "
             f"ik={ik_fk['position_error_m']:.6f}m/{ik_fk['rotation_error_deg']:.3f}deg "
-            f"qmax={rep['q_delta_abs_max_rad']:.5f}rad success={ik['success']}"
+            f"qmax={rep['q_delta_abs_max_rad']:.5f}rad success={ik['success']} "
+            f"{probe_part}"
         )
     print(" | ".join(parts))
 
@@ -254,6 +521,10 @@ def main() -> int:
     parser.add_argument("--ik-position-tolerance-m", type=float, default=0.001)
     parser.add_argument("--ik-rotation-tolerance-deg", type=float, default=1.0)
     parser.add_argument("--ik-q-tolerance-rad", type=float, default=0.05)
+    parser.add_argument("--ik-probe-targets", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--ik-probe-translation-m", type=float, default=0.01)
+    parser.add_argument("--ik-probe-rotation-deg", type=float, default=5.0)
+    parser.add_argument("--ik-probe-max-joint-delta-rad", type=float, default=0.5)
     parser.add_argument("--motion-tries", type=int, default=30)
     parser.add_argument("--motion-sleep-s", type=float, default=0.1)
     parser.add_argument("--no-prompt", action="store_true", help="Sample immediately instead of waiting for Enter.")
