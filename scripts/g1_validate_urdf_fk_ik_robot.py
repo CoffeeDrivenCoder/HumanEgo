@@ -69,6 +69,13 @@ def motion_T_for_side(status: dict[str, Any], side: str) -> np.ndarray:
     return parse_motion_pose(frames[frame_name])
 
 
+def waist_values_with_height_offset(waist_values: list[float], height_offset_m: float) -> list[float]:
+    values = [float(v) for v in waist_values]
+    if len(values) >= 2:
+        values[1] += float(height_offset_m)
+    return values
+
+
 def validate_side(
     kin: G1UrdfKinematics,
     side: str,
@@ -82,6 +89,7 @@ def validate_side(
     sdk_T = motion_T_for_side(motion_status, side)
     fk_T = kin.link7_fk(side, q, waist_states=waist_values)
     fk_error = pose_error(fk_T, sdk_T)
+    fk_to_sdk_translation_delta = sdk_T[:3, 3] - fk_T[:3, 3]
     ik_result = kin.solve_link7_ik(side, sdk_T, q, waist_states=waist_values, max_nfev=max_nfev)
     ik_fk_T = kin.link7_fk(side, ik_result.q_solution, waist_states=waist_values)
     ik_error = pose_error(ik_fk_T, sdk_T)
@@ -90,11 +98,12 @@ def validate_side(
         "arm_state_mapping": mapping,
         "arm_state_indices": indices,
         "q_from_sdk": q.tolist(),
-        "waist_values": [float(v) for v in waist_values],
+        "waist_values_for_urdf": [float(v) for v in waist_values],
         "sdk_frame_name": kin.sdk_frame_names[side],
         "sdk_T_link7_in_base": sdk_T.tolist(),
         "urdf_fk_T_link7_in_base": fk_T.tolist(),
         "urdf_fk_vs_sdk_error": fk_error,
+        "urdf_fk_to_sdk_translation_delta_m": fk_to_sdk_translation_delta.tolist(),
         "ik_current_pose_self_consistency": {
             "ik": ik_result.to_json(),
             "fk_T_link7_in_base": ik_fk_T.tolist(),
@@ -113,6 +122,12 @@ def main() -> int:
     parser.add_argument("--arm-state-mapping", choices=["left_first", "right_first"], default="left_first")
     parser.add_argument("--try-both-mappings", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-nfev", type=int, default=300)
+    parser.add_argument(
+        "--waist-height-offset-m",
+        type=float,
+        default=0.0,
+        help="Add this offset to SDK waist[1] before URDF FK/IK. Use to test SDK/URDF base-height convention.",
+    )
     parser.add_argument("--upload-url", default="")
     parser.add_argument("--upload-timeout-s", type=float, default=20.0)
     args = parser.parse_args()
@@ -140,6 +155,7 @@ def main() -> int:
         joint_states = read_robot_joint_states_for_trajectory(robot)
         status = wait_motion_status(controller)
         kin = G1UrdfKinematics(args.urdf_zip)
+        waist_values_for_urdf = waist_values_with_height_offset(joint_states["waist"], args.waist_height_offset_m)
         mappings = ["left_first", "right_first"] if args.try_both_mappings else [args.arm_state_mapping]
         validation: dict[str, Any] = {}
         for mapping in mappings:
@@ -148,7 +164,7 @@ def main() -> int:
                     kin,
                     side,
                     joint_states["arm"],
-                    joint_states["waist"],
+                    waist_values_for_urdf,
                     status,
                     mapping,
                     args.max_nfev,
@@ -161,12 +177,16 @@ def main() -> int:
                 "ok": True,
                 "control_sent": False,
                 "joint_states": joint_states,
+                "waist_values_for_urdf": waist_values_for_urdf,
+                "waist_height_offset_m": float(args.waist_height_offset_m),
                 "motion_status": json_safe(status),
                 "validation": validation,
                 "chosen_mapping": args.arm_state_mapping,
                 "chosen_summary": {
                     side: {
                         "fk_position_error_m": chosen[side]["urdf_fk_vs_sdk_error"]["position_error_m"],
+                        "fk_position_error_vector_m": chosen[side]["urdf_fk_vs_sdk_error"]["position_error_vector_m"],
+                        "fk_to_sdk_translation_delta_m": chosen[side]["urdf_fk_to_sdk_translation_delta_m"],
                         "fk_rotation_error_deg": chosen[side]["urdf_fk_vs_sdk_error"]["rotation_error_deg"],
                         "ik_position_error_m": chosen[side]["ik_current_pose_self_consistency"]["fk_vs_sdk_error"]["position_error_m"],
                         "ik_rotation_error_deg": chosen[side]["ik_current_pose_self_consistency"]["fk_vs_sdk_error"]["rotation_error_deg"],
@@ -222,4 +242,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     main()
-

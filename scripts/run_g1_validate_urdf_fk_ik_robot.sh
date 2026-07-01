@@ -17,6 +17,7 @@ URDF_ZIP="${G1_IK_URDF_ZIP:-G1/G1_URDF_Omnipicker.zip}"
 ARM_STATE_MAPPING="${G1_IK_ARM_STATE_MAPPING:-left_first}"
 TRY_BOTH_MAPPINGS="${G1_IK_TRY_BOTH_MAPPINGS:-true}"
 MAX_NFEV="${G1_IK_MAX_NFEV:-300}"
+WAIST_HEIGHT_OFFSET_M="${G1_IK_WAIST_HEIGHT_OFFSET_M:-0.0}"
 UPLOAD_URL="${G1_IK_UPLOAD_URL:-${G1_DIAG_UPLOAD_URL:-}}"
 UPLOAD_TIMEOUT_S="${G1_IK_UPLOAD_TIMEOUT_S:-20}"
 
@@ -32,7 +33,7 @@ python3 scripts/g1_validate_urdf_fk_ik_robot.py \
   --arm-state-mapping "$ARM_STATE_MAPPING" \
   "$TRY_BOTH_ARG" \
   --max-nfev "$MAX_NFEV" \
+  --waist-height-offset-m "$WAIST_HEIGHT_OFFSET_M" \
   --upload-timeout-s "$UPLOAD_TIMEOUT_S" \
   --upload-url "$UPLOAD_URL" \
   "$@"
-

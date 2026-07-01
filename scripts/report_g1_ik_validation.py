@@ -35,11 +35,13 @@ def print_robot(data: dict[str, Any]) -> None:
         print(f"mapping={mapping}")
         for side, rep in (sides or {}).items():
             fk = rep.get("urdf_fk_vs_sdk_error") or {}
+            fk_delta = rep.get("urdf_fk_to_sdk_translation_delta_m")
             ik = ((rep.get("ik_current_pose_self_consistency") or {}).get("ik") or {})
             print(
                 f"  {side}: "
                 f"fk_pos={fk.get('position_error_m')}m "
                 f"fk_rot={fk.get('rotation_error_deg')}deg "
+                f"fk_delta={fk_delta} "
                 f"ik_success={ik.get('success')} "
                 f"ik_pos={ik.get('position_error_m')}m "
                 f"ik_rot={ik.get('rotation_error_deg')}deg "
@@ -63,4 +65,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
