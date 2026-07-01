@@ -52,6 +52,7 @@ from g1_humanego_client_dry_run import (  # noqa: E402
 )
 from g1_humanego_dry_run import pose_dict_from_T  # noqa: E402
 from g1_artifacts import artifact_dir, run_dir as artifact_run_dir  # noqa: E402
+from g1_urdf_ik import DEFAULT_G1_ZIP, G1UrdfKinematics, pose_error  # noqa: E402
 
 
 EPS = 1e-12
@@ -230,6 +231,10 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
     tracking_gate = step_record.get("tracking_gate") or {}
     control_result = step_record.get("control_result") or {}
     control_delta_pose = control_result.get("delta_pose") or {}
+    control_ik = control_result.get("ik") or {}
+    control_ik_error = control_result.get("ik_fk_vs_target_error") or {}
+    post_ee_target_error = step_record.get("post_ee_target_pose_error") or {}
+    settled_target_error = step_record.get("settled_target_pose_error") or {}
     closed_loop = step_record.get("closed_loop_result") or {}
     return {
         "idx": step_record.get("idx"),
@@ -248,6 +253,12 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
         "delta_pose_action_data": control_delta_pose.get("action_data"),
         "delta_pose_rotation_vector_deg": control_delta_pose.get("rotation_vector_deg"),
         "delta_pose_rotation_frame": control_delta_pose.get("rotation_frame"),
+        "ik_abs_joint_success": control_ik.get("success"),
+        "ik_abs_joint_q_delta_abs_max_rad": control_result.get("q_delta_abs_max_rad"),
+        "ik_abs_joint_q_delta_norm_rad": control_result.get("q_delta_norm_rad"),
+        "ik_abs_joint_position_error_m": control_ik_error.get("position_error_m"),
+        "ik_abs_joint_rotation_error_deg": control_ik_error.get("rotation_error_deg"),
+        "ik_abs_joint_blocked_reason": control_result.get("blocked_reason"),
         "closed_loop_enabled": closed_loop.get("enabled"),
         "closed_loop_reached": closed_loop.get("reached"),
         "closed_loop_attempts": closed_loop.get("num_attempts"),
@@ -260,10 +271,14 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
         "post_ee_delta_m": step_record.get("post_ee_delta_m"),
         "post_ee_delta_norm_m": step_record.get("post_ee_delta_norm_m"),
         "post_ee_rotation_delta_deg": step_record.get("post_ee_rotation_delta_deg"),
+        "post_ee_target_position_error_m": post_ee_target_error.get("position_error_m"),
+        "post_ee_target_rotation_error_deg": post_ee_target_error.get("rotation_error_deg"),
         "post_ee_cos_to_target": post_ee_tracking.get("cosine_to_target_delta"),
         "settled_delta_m": step_record.get("settled_delta_m"),
         "settled_delta_norm_m": step_record.get("settled_delta_norm_m"),
         "settled_rotation_delta_deg": step_record.get("observed_rotation_delta_deg"),
+        "settled_target_position_error_m": settled_target_error.get("position_error_m"),
+        "settled_target_rotation_error_deg": settled_target_error.get("rotation_error_deg"),
         "settled_cos_to_target": settled_tracking.get("cosine_to_target_delta"),
         "tracking_ratio": tracking_gate.get("ratio"),
         "tracking_gate_bad": tracking_gate.get("bad"),
@@ -782,6 +797,225 @@ def read_robot_joint_states_for_trajectory(robot: Any) -> dict[str, Any]:
     }
 
 
+def side_q_from_arm_state(arm_values: list[float], side: str, mapping: str) -> tuple[np.ndarray, list[int]]:
+    values = [float(v) for v in arm_values]
+    if len(values) < 14:
+        raise ValueError(f"arm_joint_states must contain at least 14 values, got {len(values)}")
+    side = side.lower()
+    mapping = mapping.lower()
+    if mapping == "left_first":
+        indices = list(range(0, 7)) if side == "left" else list(range(7, 14))
+    elif mapping == "right_first":
+        indices = list(range(7, 14)) if side == "left" else list(range(0, 7))
+    else:
+        raise ValueError(f"unknown arm state mapping {mapping!r}")
+    return np.asarray([values[i] for i in indices], dtype=np.float64), indices
+
+
+def arm_state_with_side_q(arm_values: list[float], side: str, mapping: str, q_side: np.ndarray) -> list[float]:
+    out = [float(v) for v in arm_values]
+    q = np.asarray(q_side, dtype=np.float64).reshape(7)
+    _, indices = side_q_from_arm_state(out, side, mapping)
+    for idx, value in zip(indices, q):
+        out[idx] = float(value)
+    return out
+
+
+def split_left_right_from_full_arm(arm_values: list[float], mapping: str) -> tuple[list[float], list[float]]:
+    left_q, _ = side_q_from_arm_state(arm_values, "left", mapping)
+    right_q, _ = side_q_from_arm_state(arm_values, "right", mapping)
+    return left_q.tolist(), right_q.tolist()
+
+
+def waist_values_with_height_offset(waist_values: list[float], height_offset_m: float) -> list[float]:
+    values = [float(v) for v in waist_values]
+    if len(values) >= 2:
+        values[1] += float(height_offset_m)
+    return values
+
+
+def interpolate_q(q_start: np.ndarray, q_target: np.ndarray, num_points: int) -> list[np.ndarray]:
+    q_start = np.asarray(q_start, dtype=np.float64).reshape(7)
+    q_target = np.asarray(q_target, dtype=np.float64).reshape(7)
+    count = max(1, int(num_points))
+    return [q_start + (q_target - q_start) * (idx / count) for idx in range(1, count + 1)]
+
+
+def call_ee_ik_abs_joint_trajectory_once(
+    controller: Any,
+    robot: Any,
+    target_T_link7: np.ndarray,
+    side: str,
+    trajectory_reference_time: float,
+    waist_height_offset_m: float,
+    arm_state_mapping: str,
+    num_points: int,
+    max_nfev: int,
+    max_joint_delta_rad: float,
+    urdf_zip: str,
+    execute_control: bool = True,
+) -> dict[str, Any]:
+    started = time.time()
+    target_T = np.asarray(target_T_link7, dtype=np.float64).reshape(4, 4)
+    joint_states = read_robot_joint_states_for_trajectory(robot)
+    waist_for_urdf = waist_values_with_height_offset(joint_states["waist"], waist_height_offset_m)
+    q_before, arm_indices = side_q_from_arm_state(joint_states["arm"], side, arm_state_mapping)
+    kin = G1UrdfKinematics(urdf_zip)
+    before_fk_T = kin.link7_fk(side, q_before, waist_states=waist_for_urdf)
+    ik = kin.solve_link7_ik(side, target_T, q_before, waist_states=waist_for_urdf, max_nfev=max_nfev)
+    q_target = ik.q_solution
+    q_delta = q_target - q_before
+    q_delta_abs_max = float(np.max(np.abs(q_delta)))
+    target_fk_T = kin.link7_fk(side, q_target, waist_states=waist_for_urdf)
+    ik_fk_error = pose_error(target_fk_T, target_T)
+    if not ik.success:
+        return {
+            "ok": False,
+            "duration_s": time.time() - started,
+            "mode": "ik_abs_joint",
+            "side": side,
+            "joint_states": joint_states,
+            "waist_values_for_urdf": waist_for_urdf,
+            "arm_state_mapping": arm_state_mapping,
+            "arm_state_indices": arm_indices,
+            "q_before": q_before.tolist(),
+            "q_target": q_target.tolist(),
+            "q_delta": q_delta.tolist(),
+            "q_delta_abs_max_rad": q_delta_abs_max,
+            "before_fk_T_link7_in_base": before_fk_T.tolist(),
+            "target_T_link7_in_base": target_T.tolist(),
+            "target_fk_T_link7_in_base": target_fk_T.tolist(),
+            "ik": ik.to_json(),
+            "ik_fk_vs_target_error": ik_fk_error,
+            "blocked_reason": "ik_failed",
+        }
+    if q_delta_abs_max > float(max_joint_delta_rad):
+        return {
+            "ok": False,
+            "duration_s": time.time() - started,
+            "mode": "ik_abs_joint",
+            "side": side,
+            "joint_states": joint_states,
+            "waist_values_for_urdf": waist_for_urdf,
+            "arm_state_mapping": arm_state_mapping,
+            "arm_state_indices": arm_indices,
+            "q_before": q_before.tolist(),
+            "q_target": q_target.tolist(),
+            "q_delta": q_delta.tolist(),
+            "q_delta_abs_max_rad": q_delta_abs_max,
+            "before_fk_T_link7_in_base": before_fk_T.tolist(),
+            "target_T_link7_in_base": target_T.tolist(),
+            "target_fk_T_link7_in_base": target_fk_T.tolist(),
+            "ik": ik.to_json(),
+            "ik_fk_vs_target_error": ik_fk_error,
+            "blocked_reason": "joint_delta_too_large",
+            "max_joint_delta_rad": float(max_joint_delta_rad),
+        }
+
+    q_rows = interpolate_q(q_before, q_target, num_points)
+    full_arm_rows = [arm_state_with_side_q(joint_states["arm"], side, arm_state_mapping, row) for row in q_rows]
+    robot_actions = []
+    for full_arm in full_arm_rows:
+        left_q, right_q = split_left_right_from_full_arm(full_arm, arm_state_mapping)
+        robot_actions.append(
+            {
+                "left_arm": {"action_data": left_q, "control_type": "ABS_JOINT"},
+                "right_arm": {"action_data": right_q, "control_type": "ABS_JOINT"},
+            }
+        )
+    kwargs = {
+        "infer_timestamp": int(time.time() * 1e9),
+        "robot_states": {
+            "head": joint_states["head"],
+            "waist": joint_states["waist"],
+            "arm": joint_states["arm"],
+        },
+        "robot_actions": robot_actions,
+        "robot_link": "base_link",
+        "trajectory_reference_time": float(trajectory_reference_time),
+    }
+    if not execute_control:
+        return {
+            "ok": True,
+            "duration_s": time.time() - started,
+            "mode": "ik_abs_joint",
+            "side": side,
+            "preview_only": True,
+            "joint_states": joint_states,
+            "waist_values_for_urdf": waist_for_urdf,
+            "arm_state_mapping": arm_state_mapping,
+            "arm_state_indices": arm_indices,
+            "num_points": int(num_points),
+            "trajectory_reference_time": float(trajectory_reference_time),
+            "q_before": q_before.tolist(),
+            "q_target": q_target.tolist(),
+            "q_delta": q_delta.tolist(),
+            "q_delta_norm_rad": float(np.linalg.norm(q_delta)),
+            "q_delta_abs_max_rad": q_delta_abs_max,
+            "full_arm_target_rows": full_arm_rows,
+            "before_fk_T_link7_in_base": before_fk_T.tolist(),
+            "target_T_link7_in_base": target_T.tolist(),
+            "target_fk_T_link7_in_base": target_fk_T.tolist(),
+            "ik": ik.to_json(),
+            "ik_fk_vs_target_error": ik_fk_error,
+            "kwargs": json_safe(kwargs),
+        }
+    try:
+        result = controller.trajectory_tracking_control(**kwargs)
+        return {
+            "ok": True,
+            "duration_s": time.time() - started,
+            "mode": "ik_abs_joint",
+            "side": side,
+            "joint_states": joint_states,
+            "waist_values_for_urdf": waist_for_urdf,
+            "arm_state_mapping": arm_state_mapping,
+            "arm_state_indices": arm_indices,
+            "num_points": int(num_points),
+            "trajectory_reference_time": float(trajectory_reference_time),
+            "q_before": q_before.tolist(),
+            "q_target": q_target.tolist(),
+            "q_delta": q_delta.tolist(),
+            "q_delta_norm_rad": float(np.linalg.norm(q_delta)),
+            "q_delta_abs_max_rad": q_delta_abs_max,
+            "full_arm_target_rows": full_arm_rows,
+            "before_fk_T_link7_in_base": before_fk_T.tolist(),
+            "target_T_link7_in_base": target_T.tolist(),
+            "target_fk_T_link7_in_base": target_fk_T.tolist(),
+            "ik": ik.to_json(),
+            "ik_fk_vs_target_error": ik_fk_error,
+            "kwargs": json_safe(kwargs),
+            "result": json_safe(result),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "duration_s": time.time() - started,
+            "mode": "ik_abs_joint",
+            "side": side,
+            "joint_states": joint_states,
+            "waist_values_for_urdf": waist_for_urdf,
+            "arm_state_mapping": arm_state_mapping,
+            "arm_state_indices": arm_indices,
+            "num_points": int(num_points),
+            "trajectory_reference_time": float(trajectory_reference_time),
+            "q_before": q_before.tolist(),
+            "q_target": q_target.tolist(),
+            "q_delta": q_delta.tolist(),
+            "q_delta_norm_rad": float(np.linalg.norm(q_delta)),
+            "q_delta_abs_max_rad": q_delta_abs_max,
+            "before_fk_T_link7_in_base": before_fk_T.tolist(),
+            "target_T_link7_in_base": target_T.tolist(),
+            "target_fk_T_link7_in_base": target_fk_T.tolist(),
+            "ik": ik.to_json(),
+            "ik_fk_vs_target_error": ik_fk_error,
+            "kwargs": json_safe(kwargs),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
 def call_ee_delta_pose_trajectory_once(
     controller: Any,
     robot: Any,
@@ -859,6 +1093,13 @@ def call_ee_control_mode(
     mode: str,
     delta_pose_rotation_frame: str,
     delta_pose_reference_time: float | None,
+    ik_abs_joint_reference_time: float | None = None,
+    ik_abs_joint_waist_height_offset_m: float = -0.3,
+    ik_abs_joint_arm_state_mapping: str = "left_first",
+    ik_abs_joint_num_points: int = 20,
+    ik_abs_joint_max_nfev: int = 300,
+    ik_abs_joint_max_delta_rad: float = 0.35,
+    ik_abs_joint_urdf_zip: str = str(DEFAULT_G1_ZIP),
 ) -> dict[str, Any]:
     if mode == "absolute_pose":
         result = call_ee_control(controller, pose, side, lifetime, send_hz, execute_s)
@@ -884,6 +1125,40 @@ def call_ee_control_mode(
                 time.sleep(wait_s)
         result["ee_control_mode"] = mode
         result["send_mode"] = "single_delta_pose"
+        result["num_sends"] = 1
+        result["command_duration_s"] = command_duration_s
+        result["duration_s"] = time.time() - started
+        result["execute_s"] = float(execute_s)
+        result["trajectory_reference_time"] = reference_time
+        return result
+    if mode == "ik_abs_joint":
+        reference_time = (
+            float(ik_abs_joint_reference_time)
+            if ik_abs_joint_reference_time is not None
+            else float(execute_s)
+        )
+        reference_time = max(reference_time, 0.05)
+        started = time.time()
+        result = call_ee_ik_abs_joint_trajectory_once(
+            controller,
+            robot,
+            target_T_link7,
+            side,
+            reference_time,
+            ik_abs_joint_waist_height_offset_m,
+            ik_abs_joint_arm_state_mapping,
+            ik_abs_joint_num_points,
+            ik_abs_joint_max_nfev,
+            ik_abs_joint_max_delta_rad,
+            ik_abs_joint_urdf_zip,
+        )
+        command_duration_s = float(result.get("duration_s", 0.0))
+        if result.get("ok"):
+            wait_s = max(0.0, float(execute_s) - (time.time() - started))
+            if wait_s > 0.0:
+                time.sleep(wait_s)
+        result["ee_control_mode"] = mode
+        result["send_mode"] = "single_ik_abs_joint_trajectory"
         result["num_sends"] = 1
         result["command_duration_s"] = command_duration_s
         result["duration_s"] = time.time() - started
@@ -931,6 +1206,13 @@ def call_ee_closed_loop_control(
     mode: str,
     delta_pose_rotation_frame: str,
     delta_pose_reference_time: float | None,
+    ik_abs_joint_reference_time: float | None,
+    ik_abs_joint_waist_height_offset_m: float,
+    ik_abs_joint_arm_state_mapping: str,
+    ik_abs_joint_num_points: int,
+    ik_abs_joint_max_nfev: int,
+    ik_abs_joint_max_delta_rad: float,
+    ik_abs_joint_urdf_zip: str,
     max_attempts: int,
     position_tolerance_m: float,
     rotation_tolerance_deg: float,
@@ -995,6 +1277,13 @@ def call_ee_closed_loop_control(
             mode,
             delta_pose_rotation_frame,
             delta_pose_reference_time,
+            ik_abs_joint_reference_time,
+            ik_abs_joint_waist_height_offset_m,
+            ik_abs_joint_arm_state_mapping,
+            ik_abs_joint_num_points,
+            ik_abs_joint_max_nfev,
+            ik_abs_joint_max_delta_rad,
+            ik_abs_joint_urdf_zip,
         )
         if settle_s > 0.0:
             time.sleep(float(settle_s))
@@ -1258,9 +1547,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--send-hz", type=float, default=10.0)
     parser.add_argument("--execute-s", type=float, default=1.0)
     parser.add_argument("--settle-s", type=float, default=1.0)
-    parser.add_argument("--ee-control-mode", choices=["absolute_pose", "delta_pose"], default="absolute_pose")
+    parser.add_argument("--ee-control-mode", choices=["absolute_pose", "delta_pose", "ik_abs_joint"], default="absolute_pose")
     parser.add_argument("--delta-pose-rotation-frame", choices=["base", "local"], default="base")
     parser.add_argument("--delta-pose-reference-time", type=float, default=None)
+    parser.add_argument("--ik-abs-joint-reference-time", type=float, default=None)
+    parser.add_argument("--ik-abs-joint-waist-height-offset-m", type=float, default=-0.3)
+    parser.add_argument("--ik-abs-joint-arm-state-mapping", choices=["left_first", "right_first"], default="left_first")
+    parser.add_argument("--ik-abs-joint-num-points", type=int, default=20)
+    parser.add_argument("--ik-abs-joint-max-nfev", type=int, default=300)
+    parser.add_argument("--ik-abs-joint-max-delta-rad", type=float, default=0.35)
+    parser.add_argument("--ik-abs-joint-urdf-zip", default=str(DEFAULT_G1_ZIP))
     parser.add_argument("--closed-loop-ee", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--closed-loop-max-attempts", type=int, default=5)
     parser.add_argument("--closed-loop-position-tolerance-m", type=float, default=0.01)
@@ -1454,6 +1750,30 @@ def main() -> int:
                     f"rotvec_deg={delta_preview['rotation_vector_deg']} "
                     f"frame={delta_preview['rotation_frame']}"
                 )
+            if args.ee_control_mode == "ik_abs_joint":
+                ik_preview = call_ee_ik_abs_joint_trajectory_once(
+                    arm.controller,
+                    arm.robot,
+                    target_T_link7,
+                    args.side,
+                    args.ik_abs_joint_reference_time if args.ik_abs_joint_reference_time is not None else args.execute_s,
+                    args.ik_abs_joint_waist_height_offset_m,
+                    args.ik_abs_joint_arm_state_mapping,
+                    args.ik_abs_joint_num_points,
+                    args.ik_abs_joint_max_nfev,
+                    args.ik_abs_joint_max_delta_rad,
+                    args.ik_abs_joint_urdf_zip,
+                    execute_control=False,
+                )
+                print(
+                    "ik_abs_joint preview: "
+                    f"ok={ik_preview.get('ok')} "
+                    f"blocked={ik_preview.get('blocked_reason')} "
+                    f"q_delta_abs_max_rad={ik_preview.get('q_delta_abs_max_rad')} "
+                    f"q_delta_norm_rad={ik_preview.get('q_delta_norm_rad')} "
+                    f"ik_pos_err={((ik_preview.get('ik_fk_vs_target_error') or {}).get('position_error_m'))} "
+                    f"ik_rot_err={((ik_preview.get('ik_fk_vs_target_error') or {}).get('rotation_error_deg'))}"
+                )
             if abs(float(args.target_z_bias_m)) > EPS:
                 print(f"target_z_bias_m: {args.target_z_bias_m:+.4f}")
             print(f"target_delta_m: {target_delta.tolist()}  norm={target_delta_norm:.4f}")
@@ -1594,6 +1914,13 @@ def main() -> int:
                     args.ee_control_mode,
                     args.delta_pose_rotation_frame,
                     args.delta_pose_reference_time,
+                    args.ik_abs_joint_reference_time,
+                    args.ik_abs_joint_waist_height_offset_m,
+                    args.ik_abs_joint_arm_state_mapping,
+                    args.ik_abs_joint_num_points,
+                    args.ik_abs_joint_max_nfev,
+                    args.ik_abs_joint_max_delta_rad,
+                    args.ik_abs_joint_urdf_zip,
                     args.closed_loop_max_attempts,
                     args.closed_loop_position_tolerance_m,
                     args.closed_loop_rotation_tolerance_deg,
@@ -1644,6 +1971,13 @@ def main() -> int:
                     args.ee_control_mode,
                     args.delta_pose_rotation_frame,
                     args.delta_pose_reference_time,
+                    args.ik_abs_joint_reference_time,
+                    args.ik_abs_joint_waist_height_offset_m,
+                    args.ik_abs_joint_arm_state_mapping,
+                    args.ik_abs_joint_num_points,
+                    args.ik_abs_joint_max_nfev,
+                    args.ik_abs_joint_max_delta_rad,
+                    args.ik_abs_joint_urdf_zip,
                 )
             report["control_sent"] = True
             step_record["executed"] = bool(control_result.get("ok"))
@@ -1657,6 +1991,7 @@ def main() -> int:
             step_record["post_ee_rotation_delta_deg"] = rotation_angle_deg(
                 post_ee_T_link7[:3, :3] @ before_T_link7[:3, :3].T
             )
+            step_record["post_ee_target_pose_error"] = pose_error_report(post_ee_T_link7, target_T_link7)
             step_record["post_ee_translation_tracking"] = translation_tracking_report(target_delta, post_ee_delta)
             if object_base is not None:
                 post_ee_dist = float(np.linalg.norm(post_ee_T_link7[:3, 3] - object_base))
@@ -1754,6 +2089,7 @@ def main() -> int:
             step_record["observed_rotation_delta_deg"] = rotation_angle_deg(
                 after_T_link7[:3, :3] @ before_T_link7[:3, :3].T
             )
+            step_record["settled_target_pose_error"] = pose_error_report(after_T_link7, target_T_link7)
             target_norm_for_gate = float(step_record["settled_translation_tracking"].get("target_norm_m") or 0.0)
             observed_norm_for_gate = float(step_record["settled_translation_tracking"].get("observed_norm_m") or 0.0)
             tracking_ratio = observed_norm_for_gate / target_norm_for_gate if target_norm_for_gate > EPS else None
