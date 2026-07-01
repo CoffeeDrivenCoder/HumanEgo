@@ -305,6 +305,29 @@ def compact_step_summary(step_record: dict[str, Any], response: dict[str, Any]) 
     }
 
 
+def append_step_outputs(
+    step_record: dict[str, Any],
+    response: dict[str, Any],
+    report: dict[str, Any],
+    step_summaries: list[dict[str, Any]],
+    step_summaries_path: Path,
+    step_summaries_jsonl_path: Path,
+    step_dir: Path | None = None,
+) -> dict[str, Any]:
+    summary = compact_step_summary(step_record, response)
+    step_summaries.append(summary)
+    step_summaries_path.write_text(json.dumps(json_safe(step_summaries), ensure_ascii=False, indent=2), encoding="utf-8")
+    with step_summaries_jsonl_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(json_safe(summary), ensure_ascii=False) + "\n")
+    report["steps"].append(step_record)
+    if step_dir is not None:
+        (step_dir / "step_record.json").write_text(
+            json.dumps(json_safe(step_record), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    return summary
+
+
 def select_target(
     step_preview: dict[str, Any],
     source: str,
@@ -1738,6 +1761,7 @@ def main() -> int:
             print(f"target_source: {args.target_source}")
             print(f"target_adapter: {args.target_adapter}")
             print(f"ee_control_mode: {args.ee_control_mode}")
+            ik_preview = None
             if args.ee_control_mode == "delta_pose":
                 delta_preview = link7_delta_pose_command(
                     before_T_link7,
@@ -1774,6 +1798,11 @@ def main() -> int:
                     f"ik_pos_err={((ik_preview.get('ik_fk_vs_target_error') or {}).get('position_error_m'))} "
                     f"ik_rot_err={((ik_preview.get('ik_fk_vs_target_error') or {}).get('rotation_error_deg'))}"
                 )
+                if not ik_preview.get("ok"):
+                    print(
+                        "ik_abs_joint safety stop: "
+                        f"{ik_preview.get('blocked_reason') or ik_preview.get('error_type') or 'unknown'}"
+                    )
             if abs(float(args.target_z_bias_m)) > EPS:
                 print(f"target_z_bias_m: {args.target_z_bias_m:+.4f}")
             print(f"target_delta_m: {target_delta.tolist()}  norm={target_delta_norm:.4f}")
@@ -1820,9 +1849,6 @@ def main() -> int:
                 print(compact_alignment("tcp axes target", target_alignment, target_alignment_improvement))
             print(f"{args.side}_pose: {compact_pose(target_pose)}")
 
-            operator = choose_operator(args.control_mode)
-            if operator == "auto":
-                log(f"step {idx}: auto control mode executing without prompt")
             step_record: Dict[str, Any] = {
                 "idx": idx,
                 "request_id": request_id,
@@ -1853,40 +1879,47 @@ def main() -> int:
                     "raw_model_improvement": raw_alignment_improvement,
                     "target_improvement": target_alignment_improvement,
                 },
-                "operator_input": operator,
+                "operator_input": None,
+                "ik_abs_joint_preview": ik_preview,
                 "server_response": response,
             }
+
+            if ik_preview is not None and not ik_preview.get("ok"):
+                reason = ik_preview.get("blocked_reason") or ik_preview.get("error_type") or "ik_abs_joint_preview_failed"
+                log(f"step {idx}: IK ABS_JOINT safety stop before prompt: {reason}")
+                step_record["executed"] = False
+                step_record["blocked_reason"] = f"ik_abs_joint_preview_{reason}"
+                step_record["control_result"] = ik_preview
+                report["stopped_by"] = {
+                    "type": "ik_abs_joint_safety_preview",
+                    "step": idx,
+                    "reason": reason,
+                    "q_delta_abs_max_rad": ik_preview.get("q_delta_abs_max_rad"),
+                    "max_joint_delta_rad": args.ik_abs_joint_max_delta_rad,
+                }
+                append_step_outputs(step_record, response, report, step_summaries, step_summaries_path, step_summaries_jsonl_path, step_dir)
+                break
+
+            operator = choose_operator(args.control_mode)
+            step_record["operator_input"] = operator
+            if operator == "auto":
+                log(f"step {idx}: auto control mode executing without prompt")
 
             if operator == "q":
                 log("operator requested quit")
                 step_record["executed"] = False
-                summary = compact_step_summary(step_record, response)
-                step_summaries.append(summary)
-                step_summaries_path.write_text(json.dumps(json_safe(step_summaries), ensure_ascii=False, indent=2), encoding="utf-8")
-                with step_summaries_jsonl_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(json_safe(summary), ensure_ascii=False) + "\n")
-                report["steps"].append(step_record)
+                append_step_outputs(step_record, response, report, step_summaries, step_summaries_path, step_summaries_jsonl_path, step_dir)
                 break
             if operator == "s":
                 log("operator skipped this target")
                 step_record["executed"] = False
-                summary = compact_step_summary(step_record, response)
-                step_summaries.append(summary)
-                step_summaries_path.write_text(json.dumps(json_safe(step_summaries), ensure_ascii=False, indent=2), encoding="utf-8")
-                with step_summaries_jsonl_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(json_safe(summary), ensure_ascii=False) + "\n")
-                report["steps"].append(step_record)
+                append_step_outputs(step_record, response, report, step_summaries, step_summaries_path, step_summaries_jsonl_path, step_dir)
                 continue
             if args.confirm_control != "RUN_CONTROL":
                 log("refusing to execute because --confirm-control RUN_CONTROL is missing")
                 step_record["executed"] = False
                 step_record["blocked_reason"] = "missing RUN_CONTROL confirmation"
-                summary = compact_step_summary(step_record, response)
-                step_summaries.append(summary)
-                step_summaries_path.write_text(json.dumps(json_safe(step_summaries), ensure_ascii=False, indent=2), encoding="utf-8")
-                with step_summaries_jsonl_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(json_safe(summary), ensure_ascii=False) + "\n")
-                report["steps"].append(step_record)
+                append_step_outputs(step_record, response, report, step_summaries, step_summaries_path, step_summaries_jsonl_path, step_dir)
                 break
 
             if args.closed_loop_ee:
@@ -1979,9 +2012,23 @@ def main() -> int:
                     args.ik_abs_joint_max_delta_rad,
                     args.ik_abs_joint_urdf_zip,
                 )
-            report["control_sent"] = True
+            report["control_sent"] = bool(report.get("control_sent")) or bool(control_result.get("ok"))
             step_record["executed"] = bool(control_result.get("ok"))
             step_record["control_result"] = control_result
+            if not control_result.get("ok"):
+                reason = control_result.get("blocked_reason") or control_result.get("error_type") or "control_failed"
+                log(f"step {idx}: control safety stop before motion bookkeeping: {reason}")
+                step_record["blocked_reason"] = reason
+                report["stopped_by"] = {
+                    "type": "control_safety",
+                    "step": idx,
+                    "mode": args.ee_control_mode,
+                    "reason": reason,
+                    "q_delta_abs_max_rad": control_result.get("q_delta_abs_max_rad"),
+                    "max_joint_delta_rad": args.ik_abs_joint_max_delta_rad if args.ee_control_mode == "ik_abs_joint" else None,
+                }
+                append_step_outputs(step_record, response, report, step_summaries, step_summaries_path, step_summaries_jsonl_path, step_dir)
+                break
 
             post_ee_T_link7 = arm.get_T_link7_in_base()
             post_ee_delta = post_ee_T_link7[:3, 3] - before_T_link7[:3, 3]
@@ -2006,7 +2053,9 @@ def main() -> int:
                 f"step {idx}: post_ee_delta={post_ee_delta.tolist()} "
                 f"norm={np.linalg.norm(post_ee_delta):.4f} "
                 f"rot_deg={step_record['post_ee_rotation_delta_deg']:.2f} "
-                f"cos_to_target={step_record['post_ee_translation_tracking'].get('cosine_to_target_delta')}"
+                f"cos_to_target={step_record['post_ee_translation_tracking'].get('cosine_to_target_delta')} "
+                f"target_err={step_record['post_ee_target_pose_error']['position_error_m']:.4f}m/"
+                f"{step_record['post_ee_target_pose_error']['rotation_error_deg']:.2f}deg"
             )
 
             gripper_result = None
@@ -2137,7 +2186,9 @@ def main() -> int:
             log(
                 f"step {idx}: settled_delta={observed_delta.tolist()} "
                 f"norm={np.linalg.norm(observed_delta):.4f} "
-                f"rot_deg={step_record['observed_rotation_delta_deg']:.2f}"
+                f"rot_deg={step_record['observed_rotation_delta_deg']:.2f} "
+                f"target_err={step_record['settled_target_pose_error']['position_error_m']:.4f}m/"
+                f"{step_record['settled_target_pose_error']['rotation_error_deg']:.2f}deg"
             )
             if object_base is not None:
                 log(
